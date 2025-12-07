@@ -1,7 +1,18 @@
 // app/incidents/page.tsx
-import Link from "next/link";
+"use client";
 
-const mockIncidents = [
+import Link from "next/link";
+import { useEffect, useState } from "react";
+
+type IncidentSummary = {
+  id: string;
+  title: string;
+  location: string;
+  date: string;
+  status: string;
+};
+
+const fallbackIncidents: IncidentSummary[] = [
   {
     id: "demo-1",
     title: "Structure fire – multi-family dwelling",
@@ -19,19 +30,75 @@ const mockIncidents = [
 ];
 
 export default function IncidentsPage() {
+  const [incidents, setIncidents] = useState<IncidentSummary[]>(fallbackIncidents);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    const baseUrl = process.env.NEXT_PUBLIC_API_BASE_URL;
+    if (!baseUrl) {
+      setError("API base URL is not configured; showing demo incidents.");
+      return;
+    }
+
+    setLoading(true);
+
+    fetch(`${baseUrl}/api/v1/incidents`)
+      .then(async (res) => {
+        if (!res.ok) {
+          throw new Error(`Non-OK response: ${res.status}`);
+        }
+        const data = await res.json();
+
+        // Accept either { items: [...] } or a raw []
+        const items = Array.isArray(data?.items) ? data.items : data;
+        if (Array.isArray(items) && items.length > 0) {
+          setIncidents(
+            items.map((it: any) => ({
+              id: String(it.id ?? it.incident_id ?? "unknown"),
+              title: String(
+                it.title ??
+                  it.summary ??
+                  it.incident_type ??
+                  "Unnamed incident"
+              ),
+              location: String(
+                it.location ??
+                  it.city_state ??
+                  it.census_tract ??
+                  "Unknown location"
+              ),
+              date: String(it.date ?? it.incident_date ?? "Unknown date"),
+              status: String(it.status ?? "Active"),
+            }))
+          );
+        }
+      })
+      .catch((err) => {
+        console.error(err);
+        setError("Could not load incidents from API; showing demo incidents.");
+      })
+      .finally(() => setLoading(false));
+  }, []);
+
   return (
     <section className="space-y-4">
       <h1 className="text-2xl font-semibold text-orange-400">
-        NERIS Incidents (Demo)
+        NERIS Incidents (Demo → Live)
       </h1>
       <p className="text-xs text-slate-300">
-        In the real system, this page will show NERIS-derived incident summaries
-        and risk clusters for your jurisdiction. For now, it&apos;s just a
-        placeholder list.
+        In the live system, this page will list NERIS-derived incidents and
+        hotspot clusters for your department. Right now it will try to load from
+        the API and fall back to demo data if needed.
       </p>
 
+      {loading && (
+        <p className="text-xs text-slate-400">Loading incidents from API…</p>
+      )}
+      {error && <p className="text-xs text-red-400">{error}</p>}
+
       <div className="space-y-2">
-        {mockIncidents.map((incident) => (
+        {incidents.map((incident) => (
           <Link
             key={incident.id}
             href={`/incidents/${incident.id}`}
