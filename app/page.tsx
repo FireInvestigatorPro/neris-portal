@@ -1,65 +1,62 @@
-import Image from "next/image";
+// app/page.tsx
+import Link from "next/link";
 
-export default function Home() {
+export default function HomePage() {
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
+    <section className="space-y-6">
+      <h1 className="text-3xl font-bold text-orange-400">
+        InfernoIntelAI NERIS Hotspot Intelligence
+      </h1>
+      <p className="max-w-2xl text-sm text-slate-200">
+        Web-based tools for fire departments and investigators to harness NERIS
+        incident data, identify hotspots, and power grant applications.
+        Designed and built by a working fire investigator for the real world.
+      </p>
+
+      <div className="flex flex-wrap gap-3">
+        <Link
+          href="/login"
+          className="rounded-lg bg-orange-500 px-4 py-2 text-sm font-semibold text-slate-950 shadow hover:bg-orange-400"
+        >
+          Investigator Login
+        </Link>
+        <Link
+          href="/dashboard"
+          className="rounded-lg border border-slate-700 px-4 py-2 text-sm text-slate-100 hover:border-orange-400 hover:text-orange-300"
+        >
+          View Demo Dashboard
+        </Link>
+      </div>
+
+      <div className="mt-8 grid gap-4 md:grid-cols-3">
+        <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+          <h2 className="text-sm font-semibold text-orange-300">
+            NERIS Hotspot Intelligence
+          </h2>
+          <p className="mt-2 text-xs text-slate-200">
+            Upload or connect your NERIS exports and visualize incident
+            clusters by census tract, time of day, and incident type.
           </p>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+        <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+          <h2 className="text-sm font-semibold text-orange-300">
+            Grant Assistant Engine
+          </h2>
+          <p className="mt-2 text-xs text-slate-200">
+            Turn data into narratives and justifications for AFG, SAFER,
+            FP&S, and state-level fire service grants.
+          </p>
         </div>
-      </main>
-    </div>
+        <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+          <h2 className="text-sm font-semibold text-orange-300">
+            Admin Tools & Compliance
+          </h2>
+          <p className="mt-2 text-xs text-slate-200">
+            Role-based access, department management, and NFPA-aligned
+            workflows tailored to fire investigation units.
+          </p>
+        </div>
+      </div>
+    </section>
   );
 }
