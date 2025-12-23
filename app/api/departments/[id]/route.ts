@@ -1,61 +1,45 @@
 import { NextRequest, NextResponse } from "next/server";
+import { backendBaseUrl, requireDemoAuth } from "../../_utils";
 
-const BACKEND_URL =
-  process.env.BACKEND_URL ||
-  process.env.NEXT_PUBLIC_BACKEND_URL ||
-  process.env.NEXT_PUBLIC_API_BASE_URL;
-
-function baseUrl() {
-  if (!BACKEND_URL) throw new Error("Missing BACKEND_URL env var");
-  return BACKEND_URL.replace(/\/$/, "");
-}
-
-// GET /api/departments/[id]
 export async function GET(
   _req: NextRequest,
-  context: { params: Promise<{ id: string }> }
+  { params }: { params: Promise<{ id: string }> }
 ) {
-  try {
-    const { id } = await context.params;
+  const auth = await requireDemoAuth();
+  if (!auth.ok) return NextResponse.json({ detail: "Unauthorized" }, { status: 401 });
 
-    const r = await fetch(`${baseUrl()}/api/v1/departments/${id}`, {
-      cache: "no-store",
-    });
+  const { id } = await params;
 
-    const text = await r.text();
-    return new NextResponse(text, {
-      status: r.status,
-      headers: { "content-type": r.headers.get("content-type") || "application/json" },
-    });
-  } catch (e: any) {
-    return NextResponse.json(
-      { detail: e?.message || "Failed to fetch department" },
-      { status: 500 }
-    );
-  }
+  const res = await fetch(`${backendBaseUrl()}/api/v1/departments/${id}`, {
+    headers: { Accept: "application/json" },
+    cache: "no-store",
+  });
+
+  const text = await res.text();
+  return new NextResponse(text, {
+    status: res.status,
+    headers: { "content-type": res.headers.get("content-type") ?? "application/json" },
+  });
 }
 
-// DELETE /api/departments/[id]
 export async function DELETE(
   _req: NextRequest,
-  context: { params: Promise<{ id: string }> }
+  { params }: { params: Promise<{ id: string }> }
 ) {
-  try {
-    const { id } = await context.params;
+  const auth = await requireDemoAuth();
+  if (!auth.ok) return NextResponse.json({ detail: "Unauthorized" }, { status: 401 });
 
-    const r = await fetch(`${baseUrl()}/api/v1/departments/${id}`, {
-      method: "DELETE",
-    });
+  const { id } = await params;
 
-    const text = await r.text();
-    return new NextResponse(text, {
-      status: r.status,
-      headers: { "content-type": r.headers.get("content-type") || "application/json" },
-    });
-  } catch (e: any) {
-    return NextResponse.json(
-      { detail: e?.message || "Failed to delete department" },
-      { status: 500 }
-    );
-  }
+  const res = await fetch(`${backendBaseUrl()}/api/v1/departments/${id}`, {
+    method: "DELETE",
+    headers: { Accept: "application/json" },
+  });
+
+  // Backend might return empty body on delete
+  const text = await res.text().catch(() => "");
+  return new NextResponse(text || JSON.stringify({ ok: res.ok }), {
+    status: res.status,
+    headers: { "content-type": "application/json" },
+  });
 }
