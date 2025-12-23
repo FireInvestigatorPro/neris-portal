@@ -1,41 +1,88 @@
-import { NextResponse } from "next/server";
-import { backendBaseUrl, requireDemoAuth } from "../../../_utils";
+import { NextRequest, NextResponse } from "next/server";
 
-export async function GET(_req: Request, ctx: { params: { departmentId: string } }) {
-  const auth = requireDemoAuth();
-  if (!auth.ok) return NextResponse.json({ detail: "Unauthorized" }, { status: 401 });
+function getBackendBaseUrl() {
+  const url =
+    process.env.BACKEND_URL ||
+    process.env.NEXT_PUBLIC_BACKEND_URL ||
+    process.env.NEXT_PUBLIC_API_BASE_URL;
 
-  const { departmentId } = ctx.params;
+  if (!url) return null;
+  return url.replace(/\/$/, "");
+}
 
-  const r = await fetch(`${backendBaseUrl()}/api/v1/departments/${departmentId}/incidents/`, {
+// GET /api/departments/[departmentId]/incidents
+export async function GET(
+  _req: NextRequest,
+  context: { params: Promise<{ departmentId: string }> }
+) {
+  const { departmentId } = await context.params;
+
+  const base = getBackendBaseUrl();
+  if (!base) {
+    return NextResponse.json(
+      { detail: "Backend URL not configured. Set BACKEND_URL in Vercel env." },
+      { status: 500 }
+    );
+  }
+
+  const upstreamUrl = `${base}/api/v1/departments/${encodeURIComponent(
+    departmentId
+  )}/incidents/`;
+
+  const upstreamRes = await fetch(upstreamUrl, {
     method: "GET",
-    headers: { Accept: "application/json" },
+    headers: { accept: "application/json" },
     cache: "no-store",
   });
 
-  const text = await r.text();
-  return new NextResponse(text, {
-    status: r.status,
-    headers: { "content-type": r.headers.get("content-type") ?? "application/json" },
+  const bodyText = await upstreamRes.text();
+
+  return new NextResponse(bodyText, {
+    status: upstreamRes.status,
+    headers: {
+      "content-type":
+        upstreamRes.headers.get("content-type") ?? "application/json",
+    },
   });
 }
 
-export async function POST(req: Request, ctx: { params: { departmentId: string } }) {
-  const auth = requireDemoAuth();
-  if (!auth.ok) return NextResponse.json({ detail: "Unauthorized" }, { status: 401 });
+// POST /api/departments/[departmentId]/incidents
+export async function POST(
+  req: NextRequest,
+  context: { params: Promise<{ departmentId: string }> }
+) {
+  const { departmentId } = await context.params;
 
-  const { departmentId } = ctx.params;
-  const body = await req.text();
+  const base = getBackendBaseUrl();
+  if (!base) {
+    return NextResponse.json(
+      { detail: "Backend URL not configured. Set BACKEND_URL in Vercel env." },
+      { status: 500 }
+    );
+  }
 
-  const r = await fetch(`${backendBaseUrl()}/api/v1/departments/${departmentId}/incidents/`, {
+  const upstreamUrl = `${base}/api/v1/departments/${encodeURIComponent(
+    departmentId
+  )}/incidents/`;
+
+  const json = await req.json();
+
+  const upstreamRes = await fetch(upstreamUrl, {
     method: "POST",
-    headers: { "content-type": "application/json", Accept: "application/json" },
-    body,
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(json),
   });
 
-  const text = await r.text();
-  return new NextResponse(text, {
-    status: r.status,
-    headers: { "content-type": r.headers.get("content-type") ?? "application/json" },
+  const bodyText = await upstreamRes.text();
+
+  return new NextResponse(bodyText, {
+    status: upstreamRes.status,
+    headers: {
+      "content-type":
+        upstreamRes.headers.get("content-type") ?? "application/json",
+    },
   });
 }
