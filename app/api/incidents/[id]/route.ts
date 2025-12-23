@@ -1,21 +1,63 @@
-// app/api/incidents/[id]/route.ts
-import { NextResponse } from "next/server";
-import { requireDemoAuth } from "@/app/lib/auth.server";
+import { NextRequest, NextResponse } from "next/server";
 
-export const dynamic = "force-dynamic";
+const BACKEND_URL =
+  process.env.BACKEND_URL ||
+  process.env.NEXT_PUBLIC_BACKEND_URL ||
+  process.env.NEXT_PUBLIC_API_BASE_URL;
 
-const BACKEND = process.env.BACKEND_API_BASE_URL || process.env.NEXT_PUBLIC_API_BASE_URL;
-
-function backendUrl(path: string) {
-  if (!BACKEND) throw new Error("BACKEND_API_BASE_URL is not set");
-  return `${BACKEND.replace(/\/$/, "")}${path}`;
+function baseUrl() {
+  if (!BACKEND_URL) {
+    throw new Error("Missing BACKEND_URL (or NEXT_PUBLIC_BACKEND_URL) env var");
+  }
+  return BACKEND_URL.replace(/\/$/, "");
 }
 
-export async function GET(_: Request, ctx: { params: { id: string } }) {
-  const auth = requireDemoAuth();
-  if (!auth.ok) return NextResponse.json({ detail: "Unauthorized" }, { status: 401 });
+export async function GET(
+  _req: NextRequest,
+  context: { params: Promise<{ id: string }> }
+) {
+  try {
+    const { id } = await context.params;
+    const r = await fetch(`${baseUrl()}/api/v1/incidents/${id}`, {
+      cache: "no-store",
+    });
 
-  const res = await fetch(backendUrl(`/api/v1/incidents/${ctx.params.id}`), { cache: "no-store" });
-  const data = await res.json().catch(() => ({}));
-  return NextResponse.json(data, { status: res.status });
+    const text = await r.text();
+    return new NextResponse(text, {
+      status: r.status,
+      headers: {
+        "content-type": r.headers.get("content-type") || "application/json",
+      },
+    });
+  } catch (e: any) {
+    return NextResponse.json(
+      { detail: e?.message || "Failed to fetch incident" },
+      { status: 500 }
+    );
+  }
+}
+
+export async function DELETE(
+  _req: NextRequest,
+  context: { params: Promise<{ id: string }> }
+) {
+  try {
+    const { id } = await context.params;
+    const r = await fetch(`${baseUrl()}/api/v1/incidents/${id}`, {
+      method: "DELETE",
+    });
+
+    const text = await r.text();
+    return new NextResponse(text, {
+      status: r.status,
+      headers: {
+        "content-type": r.headers.get("content-type") || "application/json",
+      },
+    });
+  } catch (e: any) {
+    return NextResponse.json(
+      { detail: e?.message || "Failed to delete incident" },
+      { status: 500 }
+    );
+  }
 }
