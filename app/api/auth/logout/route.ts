@@ -1,24 +1,37 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
-export async function POST() {
-  // Must match the cookie name used in your login route
-  const cookieName = "neris_demo_auth";
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL;
 
-  const res = NextResponse.json({ ok: true });
-
-  // Clear cookie (works on most setups)
-  res.cookies.set(cookieName, "", {
-    httpOnly: true,
-    secure: true,
-    sameSite: "lax",
-    path: "/",
-    maxAge: 0,
-  });
-
-  return res;
+function requireBackendUrl() {
+  if (!BACKEND_URL) {
+    throw new Error("Missing NEXT_PUBLIC_BACKEND_URL env var");
+  }
+  return BACKEND_URL.replace(/\/+$/, "");
 }
 
-// Optional: allow GET so you can hit it in browser
-export async function GET() {
-  return POST();
+export async function GET(
+  _req: NextRequest,
+  context: { params: Promise<{ departmentId: string }> }
+) {
+  try {
+    const { departmentId } = await context.params;
+
+    const base = requireBackendUrl();
+    const url = `${base}/api/v1/departments/${encodeURIComponent(
+      departmentId
+    )}/incidents/`;
+
+    const resp = await fetch(url, { cache: "no-store" });
+    const text = await resp.text();
+
+    return new NextResponse(text, {
+      status: resp.status,
+      headers: { "Content-Type": "application/json" },
+    });
+  } catch (err: any) {
+    return NextResponse.json(
+      { detail: err?.message ?? "Failed to proxy incidents" },
+      { status: 500 }
+    );
+  }
 }
