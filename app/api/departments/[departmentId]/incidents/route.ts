@@ -11,10 +11,7 @@ function getBackendBaseUrl() {
 }
 
 // GET /api/departments/[departmentId]/incidents
-export async function GET(
-  _req: NextRequest,
-  context: { params: Promise<{ departmentId: string }> }
-) {
+export async function GET(req: NextRequest, context: { params: Promise<{ departmentId: string }> }) {
   const { departmentId } = await context.params;
 
   const base = getBackendBaseUrl();
