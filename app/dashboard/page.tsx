@@ -31,10 +31,7 @@ function getBackendBaseUrl(): string {
 }
 
 async function fetchJson<T>(url: string): Promise<T> {
-  const res = await fetch(url, {
-    // Dashboard should feel “live” for demo; avoid stale caching surprises
-    cache: "no-store",
-  });
+  const res = await fetch(url, { cache: "no-store" });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(`Fetch failed (${res.status}) ${url} :: ${text}`);
@@ -55,13 +52,7 @@ function formatDate(iso?: string | null) {
   return d.toLocaleString();
 }
 
-function Card({
-  title,
-  children,
-}: {
-  title: string;
-  children: React.ReactNode;
-}) {
+function Card({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="rounded-xl border bg-white p-4 shadow-sm">
       <div className="text-sm font-semibold text-gray-700">{title}</div>
@@ -89,12 +80,9 @@ function Stat({
 }
 
 export default async function DashboardPage() {
-  // ✅ Lock down demo access
   requireDemoAuth();
 
   const base = getBackendBaseUrl();
-
-  // If env var missing, show a helpful message instead of blowing up
   if (!base) {
     return (
       <div className="p-6">
@@ -103,22 +91,18 @@ export default async function DashboardPage() {
           <div className="font-semibold text-red-600">Missing BACKEND_URL</div>
           <p className="mt-2 text-sm text-gray-700">
             Set <code className="rounded bg-gray-100 px-1">BACKEND_URL</code> in
-            Vercel Environment Variables to your Render backend base URL (example:
+            Vercel to:
             <code className="ml-1 rounded bg-gray-100 px-1">
               https://infernointelai-backend.onrender.com
             </code>
-            ).
           </p>
         </div>
       </div>
     );
   }
 
-  // Backend endpoints (based on what your /docs showed earlier)
   const healthUrl = `${base}/health`;
   const departmentsUrl = `${base}/api/v1/departments/`;
-  // You previously fixed this to work; leaving as the canonical list endpoint:
-  const incidentsUrl = `${base}/api/v1/incidents/`;
 
   let backendOk = false;
   let backendMsg = "";
@@ -127,7 +111,7 @@ export default async function DashboardPage() {
   let loadError: string | null = null;
 
   try {
-    // Health check (don’t fail the whole dashboard if health fails)
+    // Health check
     try {
       const healthRes = await fetch(healthUrl, { cache: "no-store" });
       backendOk = healthRes.ok;
@@ -137,14 +121,27 @@ export default async function DashboardPage() {
       backendMsg = "Down (network)";
     }
 
-    // Pull core data
+    // 1) Load depts
     departments = await fetchJson<Department[]>(departmentsUrl);
-    incidents = await fetchJson<Incident[]>(incidentsUrl);
+
+    // 2) Load incidents per dept (since /api/v1/incidents/ is NOT available)
+    const incidentLists = await Promise.all(
+      departments.map(async (d) => {
+        const url = `${base}/api/v1/departments/${d.id}/incidents/`;
+        try {
+          return await fetchJson<Incident[]>(url);
+        } catch {
+          // If a dept has no incidents endpoint for some reason, don't kill dashboard
+          return [];
+        }
+      })
+    );
+
+    incidents = incidentLists.flat();
   } catch (e: any) {
     loadError = e?.message || "Failed to load dashboard data.";
   }
 
-  // KPIs
   const totalDepartments = departments.length;
   const totalIncidents = incidents.length;
 
@@ -159,8 +156,8 @@ export default async function DashboardPage() {
     const tb = b.occurred_at ? new Date(b.occurred_at).getTime() : 0;
     return tb - ta;
   });
-  const latest = sortedByOccurred[0];
 
+  const latest = sortedByOccurred[0];
   const latestDept =
     latest && departments.find((d) => d.id === latest.department_id);
 
@@ -191,20 +188,21 @@ export default async function DashboardPage() {
           <div className="font-semibold text-red-600">Couldn’t load data</div>
           <div className="mt-2 text-sm text-gray-700">{loadError}</div>
           <div className="mt-3 text-sm text-gray-600">
-            Check that your backend is reachable and that these endpoints work:
+            Quick check these endpoints:
             <ul className="mt-1 list-disc pl-5">
               <li>
                 <code className="rounded bg-gray-100 px-1">{departmentsUrl}</code>
               </li>
               <li>
-                <code className="rounded bg-gray-100 px-1">{incidentsUrl}</code>
+                <code className="rounded bg-gray-100 px-1">
+                  {base}/api/v1/departments/{"{id}"}/incidents/
+                </code>
               </li>
             </ul>
           </div>
         </div>
       ) : (
         <>
-          {/* Value Panel */}
           <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <Stat
               label="Departments"
@@ -228,7 +226,6 @@ export default async function DashboardPage() {
             />
           </div>
 
-          {/* Latest incident + quick actions */}
           <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-3">
             <Card title="Latest Incident">
               {latest ? (
@@ -259,14 +256,12 @@ export default async function DashboardPage() {
                     >
                       View incident
                     </Link>
-                    {latestDept ? (
-                      <Link
-                        className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50"
-                        href={`/departments`}
-                      >
-                        View departments
-                      </Link>
-                    ) : null}
+                    <Link
+                      className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50"
+                      href={`/incidents`}
+                    >
+                      View all incidents
+                    </Link>
                   </div>
                 </div>
               ) : (
@@ -283,8 +278,8 @@ export default async function DashboardPage() {
             <Card title="Demo Checklist">
               <ul className="list-disc pl-5 text-sm text-gray-700">
                 <li>Login required ✅</li>
-                <li>Departments CRUD ✅ (basic)</li>
-                <li>Incidents list/detail ✅</li>
+                <li>Departments CRUD ✅</li>
+                <li>Dept incidents listing ✅</li>
                 <li>Dashboard value panel ✅</li>
               </ul>
               <div className="mt-3 text-xs text-gray-500">
@@ -300,7 +295,12 @@ export default async function DashboardPage() {
                 <Link className="underline" href="/incidents">
                   View Incidents
                 </Link>
-                <a className="underline" href={`${base}/docs`} target="_blank" rel="noreferrer">
+                <a
+                  className="underline"
+                  href={`${base}/docs`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
                   Backend API Docs
                 </a>
               </div>
