@@ -1,28 +1,23 @@
 import { NextResponse } from "next/server";
-import { backendBaseUrl, requireDemoAuth } from "../_utils";
 
 export async function GET() {
-  const auth = await requireDemoAuth();
-  if (!auth.ok) return auth.response;
+  const backend = process.env.BACKEND_URL || "https://infernointelai-backend.onrender.com";
 
   try {
-    // Use an endpoint that always exists:
-    // FastAPI serves /docs (HTML) and /openapi.json (JSON) by default.
-    const res = await fetch(`${backendBaseUrl()}/openapi.json`, {
-      cache: "no-store",
-    });
+    // Hit an endpoint that definitely exists in your backend
+    const res = await fetch(`${backend}/api/v1/departments/`, { cache: "no-store" });
 
     if (!res.ok) {
       return NextResponse.json(
-        { ok: false, status: res.status },
-        { status: 200 }
+        { ok: false, status: res.status, backend },
+        { status: 200 } // still 200 so UI can show status cleanly
       );
     }
 
-    return NextResponse.json({ ok: true, status: res.status }, { status: 200 });
+    return NextResponse.json({ ok: true, backend }, { status: 200 });
   } catch (e: any) {
     return NextResponse.json(
-      { ok: false, error: e?.message || "Fetch failed" },
+      { ok: false, error: e?.message || "fetch failed", backend },
       { status: 200 }
     );
   }
