@@ -22,7 +22,7 @@ export async function POST(req: Request) {
 
   const res = NextResponse.json({ ok: true });
 
-  // HttpOnly cookie so it can't be easily set via JS console
+  // HttpOnly cookie so it can't be set via JS console
   res.cookies.set("neris_demo_auth", token, {
     httpOnly: true,
     secure: true,
