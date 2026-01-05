@@ -8,191 +8,184 @@ type Department = {
   name: string;
   city: string;
   state: string;
-  neris_department_id?: string | null;
-  created_at?: string;
-  updated_at?: string;
+  neris_department_id: string;
 };
 
 type Incident = {
   id: number;
+  occurred_at: string;
+  address: string;
+  city: string;
+  state: string;
+  neris_incident_id: string;
   department_id: number;
-  occurred_at?: string | null;
-  address?: string | null;
-  city?: string | null;
-  state?: string | null;
-  neris_incident_id?: string | null;
   created_at?: string;
   updated_at?: string;
 };
 
 export default function IncidentsPage() {
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
   const [departments, setDepartments] = useState<Department[]>([]);
-  const [selectedDeptId, setSelectedDeptId] = useState<number | null>(null);
+  const [departmentId, setDepartmentId] = useState<number | null>(null);
 
   const [incidents, setIncidents] = useState<Incident[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
 
   const selectedDept = useMemo(
-    () => departments.find((d) => d.id === selectedDeptId) ?? null,
-    [departments, selectedDeptId]
+    () => departments.find((d) => d.id === departmentId) ?? null,
+    [departments, departmentId]
   );
 
   useEffect(() => {
     let cancelled = false;
 
-    async function load() {
-      setLoading(true);
-      setError(null);
-
+    async function loadDepartments() {
       try {
-        // 1) Load departments (via your Next API proxy)
-        const deptRes = await fetch("/api/departments", { cache: "no-store" });
-        if (!deptRes.ok) {
-          const t = await deptRes.text();
-          throw new Error(`Failed to load departments (${deptRes.status}). ${t}`);
-        }
-        const deptData: Department[] = await deptRes.json();
+        const r = await fetch("/api/departments", { cache: "no-store" });
+        if (!r.ok) throw new Error(`Failed to load departments (${r.status})`);
+        const data = (await r.json()) as Department[];
+
         if (cancelled) return;
+        setDepartments(data);
 
-        setDepartments(deptData);
-
-        // Select first department if none selected yet
-        const initialId = deptData[0]?.id ?? null;
-        setSelectedDeptId((prev) => prev ?? initialId);
-
-        // If there are no depts, there can’t be incidents
-        if (!initialId) {
-          setIncidents([]);
-          setLoading(false);
-          return;
+        // default to first dept if none selected
+        if (data.length && departmentId === null) {
+          setDepartmentId(data[0].id);
         }
-
-        // 2) Load incidents for selected department
-        const incRes = await fetch(`/api/departments/${initialId}/incidents`, { cache: "no-store" });
-        if (!incRes.ok) {
-          const t = await incRes.text();
-          throw new Error(`Failed to load incidents (${incRes.status}). ${t}`);
-        }
-        const incData: Incident[] = await incRes.json();
-        if (cancelled) return;
-
-        setIncidents(incData);
-        setLoading(false);
       } catch (e: any) {
         if (cancelled) return;
-        setError(e?.message ?? "Unknown error");
-        setLoading(false);
+        setErr(e?.message ?? "Failed to load departments");
       }
     }
 
-    load();
+    loadDepartments();
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // When user changes department, reload incidents for that dept
-  async function onSelectDept(id: number) {
-    setSelectedDeptId(id);
-    setLoading(true);
-    setError(null);
+  useEffect(() => {
+    let cancelled = false;
 
-    try {
-      const incRes = await fetch(`/api/departments/${id}/incidents`, { cache: "no-store" });
-      if (!incRes.ok) {
-        const t = await incRes.text();
-        throw new Error(`Failed to load incidents (${incRes.status}). ${t}`);
+    async function loadIncidents() {
+      if (!departmentId) return;
+      setLoading(true);
+      setErr(null);
+
+      try {
+        const r = await fetch(`/api/incidents?departmentId=${departmentId}`, {
+          cache: "no-store",
+        });
+
+        if (!r.ok) {
+          const text = await r.text();
+          throw new Error(`Failed to load incidents (${r.status}). ${text}`);
+        }
+
+        const data = (await r.json()) as Incident[];
+        if (cancelled) return;
+        setIncidents(data);
+      } catch (e: any) {
+        if (cancelled) return;
+        setErr(e?.message ?? "Failed to load incidents");
+        setIncidents([]);
+      } finally {
+        if (!cancelled) setLoading(false);
       }
-      const incData: Incident[] = await incRes.json();
-      setIncidents(incData);
-      setLoading(false);
-    } catch (e: any) {
-      setError(e?.message ?? "Unknown error");
-      setIncidents([]);
-      setLoading(false);
     }
-  }
+
+    loadIncidents();
+    return () => {
+      cancelled = true;
+    };
+  }, [departmentId]);
 
   return (
-    <div style={{ padding: 24 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "center" }}>
-        <h1 style={{ fontSize: 22, fontWeight: 700 }}>Incidents</h1>
-        <Link href="/departments" style={{ textDecoration: "underline" }}>
-          Manage departments
-        </Link>
-      </div>
-
-      <div style={{ marginTop: 12, padding: 12, border: "1px solid #ddd", borderRadius: 10 }}>
-        <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-          <div style={{ fontWeight: 600 }}>Department:</div>
-
-          {departments.length === 0 ? (
-            <div>No departments found. Create one first.</div>
-          ) : (
-            <select
-              value={selectedDeptId ?? ""}
-              onChange={(e) => onSelectDept(Number(e.target.value))}
-              style={{ padding: 8, borderRadius: 8 }}
-            >
-              {departments.map((d) => (
-                <option key={d.id} value={d.id}>
-                  {d.name} — {d.city}, {d.state} (#{d.id})
-                </option>
-              ))}
-            </select>
-          )}
-
-          {selectedDept?.neris_department_id ? (
-            <div style={{ opacity: 0.8 }}>
-              NERIS Dept ID: <code>{selectedDept.neris_department_id}</code>
-            </div>
-          ) : null}
+    <div className="space-y-6">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-semibold">Incidents</h1>
+          <p className="text-sm text-slate-300">
+            View incidents for a selected department.
+          </p>
         </div>
-      </div>
 
-      {error ? (
-        <div style={{ marginTop: 16, padding: 12, borderRadius: 10, border: "1px solid #f2b8b5" }}>
-          <div style={{ fontWeight: 700 }}>Couldn’t load incidents</div>
-          <div style={{ marginTop: 6, fontFamily: "monospace", whiteSpace: "pre-wrap" }}>{error}</div>
-        </div>
-      ) : null}
-
-      <div style={{ marginTop: 16 }}>
-        {loading ? (
-          <div>Loading…</div>
-        ) : incidents.length === 0 ? (
-          <div style={{ opacity: 0.85 }}>
-            No incidents for this department yet. Add one in your backend docs, then refresh this page.
-          </div>
-        ) : (
-          <div style={{ display: "grid", gap: 12 }}>
-            {incidents.map((i) => (
-              <div key={i.id} style={{ padding: 14, border: "1px solid #ddd", borderRadius: 12 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-                  <div style={{ fontWeight: 700 }}>
-                    Incident #{i.id}{" "}
-                    {i.neris_incident_id ? <span style={{ opacity: 0.8 }}>({i.neris_incident_id})</span> : null}
-                  </div>
-                  <div style={{ opacity: 0.75 }}>
-                    {i.occurred_at ? new Date(i.occurred_at).toLocaleString() : "No time"}
-                  </div>
-                </div>
-
-                <div style={{ marginTop: 8, opacity: 0.9 }}>
-                  {[i.address, i.city, i.state].filter(Boolean).join(", ") || "No address"}
-                </div>
-
-                <div style={{ marginTop: 10 }}>
-                  <Link href={`/incidents/${i.id}`} style={{ textDecoration: "underline" }}>
-                    View detail
-                  </Link>
-                </div>
-              </div>
+        <div className="flex items-center gap-2">
+          <label className="text-sm text-slate-300">Department</label>
+          <select
+            className="rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+            value={departmentId ?? ""}
+            onChange={(e) => setDepartmentId(Number(e.target.value))}
+          >
+            {departments.map((d) => (
+              <option key={d.id} value={d.id}>
+                {d.name} ({d.city}, {d.state})
+              </option>
             ))}
+          </select>
+        </div>
+      </div>
+
+      {selectedDept && (
+        <div className="rounded-xl border border-slate-800 bg-slate-900/50 p-4">
+          <div className="text-sm text-slate-300">Selected</div>
+          <div className="font-semibold">{selectedDept.name}</div>
+          <div className="text-sm text-slate-300">
+            NERIS ID: {selectedDept.neris_department_id}
           </div>
-        )}
+        </div>
+      )}
+
+      {err && (
+        <div className="rounded-xl border border-red-800 bg-red-950/40 p-4">
+          <div className="font-semibold">Couldn’t load incidents</div>
+          <div className="text-sm text-red-200 whitespace-pre-wrap">{err}</div>
+        </div>
+      )}
+
+      <div className="rounded-xl border border-slate-800 bg-slate-900/30">
+        <div className="border-b border-slate-800 px-4 py-3 text-sm font-semibold">
+          Incident List
+        </div>
+
+        <div className="p-4">
+          {loading ? (
+            <div className="text-sm text-slate-300">Loading…</div>
+          ) : incidents.length === 0 ? (
+            <div className="text-sm text-slate-300">No incidents found.</div>
+          ) : (
+            <div className="space-y-3">
+              {incidents.map((i) => (
+                <div
+                  key={i.id}
+                  className="rounded-lg border border-slate-800 bg-slate-950/40 p-4"
+                >
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <div className="font-semibold">
+                        {i.address}, {i.city}, {i.state}
+                      </div>
+                      <div className="text-sm text-slate-300">
+                        Occurred: {new Date(i.occurred_at).toLocaleString()}
+                      </div>
+                      <div className="text-xs text-slate-400">
+                        NERIS Incident ID: {i.neris_incident_id}
+                      </div>
+                    </div>
+
+                    <Link
+                      className="rounded-md bg-orange-600 px-3 py-2 text-sm font-semibold hover:bg-orange-500"
+                      href={`/incidents/${i.id}`}
+                    >
+                      View
+                    </Link>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
