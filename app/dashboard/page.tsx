@@ -1,6 +1,7 @@
-// app/dashboard/page.tsx
 import Link from "next/link";
+import { headers } from "next/headers";
 import { requireDemoAuth } from "../lib/auth.server";
+import type { ReactNode } from "react";
 
 type Department = {
   id: number;
@@ -30,6 +31,19 @@ function getBackendBaseUrl(): string {
   return url.replace(/\/+$/, "");
 }
 
+/**
+ * Build the current site origin so we can call our own /api/* routes from a Server Component.
+ * Works on Vercel (x-forwarded-host/proto) and locally (host).
+ *
+ * Next.js 16+: headers() is async.
+ */
+async function getSiteOrigin(): Promise<string> {
+  const h = await headers();
+  const proto = h.get("x-forwarded-proto") ?? "http";
+  const host = h.get("x-forwarded-host") ?? h.get("host") ?? "";
+  return host ? `${proto}://${host}` : "";
+}
+
 async function fetchJson<T>(url: string): Promise<T> {
   const res = await fetch(url, { cache: "no-store" });
   if (!res.ok) {
@@ -52,7 +66,7 @@ function formatDate(iso?: string | null) {
   return d.toLocaleString();
 }
 
-function Card({ title, children }: { title: string; children: React.ReactNode }) {
+function Card({ title, children }: { title: string; children: ReactNode }) {
   return (
     <div className="rounded-xl border bg-white p-4 shadow-sm">
       <div className="text-sm font-semibold text-gray-700">{title}</div>
@@ -80,7 +94,8 @@ function Stat({
 }
 
 export default async function DashboardPage() {
-  requireDemoAuth();
+  // Next.js 16 demo auth commonly relies on async cookies() under the hood, so await is safest.
+  await requireDemoAuth();
 
   const base = getBackendBaseUrl();
   if (!base) {
@@ -90,8 +105,9 @@ export default async function DashboardPage() {
         <div className="mt-4 rounded-xl border bg-white p-4">
           <div className="font-semibold text-red-600">Missing BACKEND_URL</div>
           <p className="mt-2 text-sm text-gray-700">
-            Set <code className="rounded bg-gray-100 px-1">BACKEND_URL</code> in
-            Vercel to:
+            Set{" "}
+            <code className="rounded bg-gray-100 px-1">BACKEND_URL</code> in
+            Vercel to:{" "}
             <code className="ml-1 rounded bg-gray-100 px-1">
               https://infernointelai-backend.onrender.com
             </code>
@@ -101,7 +117,11 @@ export default async function DashboardPage() {
     );
   }
 
-  const healthUrl = `${base}/health`;
+  // IMPORTANT: Use our own proxy health endpoint (/api/health),
+  // instead of calling `${base}/health` (your backend doesn't expose /health).
+  const origin = await getSiteOrigin();
+  const healthUrl = origin ? `${origin}/api/health` : "/api/health";
+
   const departmentsUrl = `${base}/api/v1/departments/`;
 
   let backendOk = false;
@@ -111,14 +131,18 @@ export default async function DashboardPage() {
   let loadError: string | null = null;
 
   try {
-    // Health check
+    // Health badge (via frontend API proxy)
     try {
-      const healthRes = await fetch(healthUrl, { cache: "no-store" });
-      backendOk = healthRes.ok;
-      backendMsg = backendOk ? "Online" : `Down (${healthRes.status})`;
-    } catch {
+      const health = await fetchJson<{ ok: boolean; backend?: string; detail?: any }>(
+        healthUrl
+      );
+      backendOk = !!health.ok;
+      backendMsg = backendOk ? "Online" : "Down";
+    } catch (e: any) {
       backendOk = false;
-      backendMsg = "Down (network)";
+      backendMsg = e?.message?.includes("Fetch failed (401)")
+        ? "Auth required"
+        : "Down";
     }
 
     // 1) Load depts
@@ -131,7 +155,6 @@ export default async function DashboardPage() {
         try {
           return await fetchJson<Incident[]>(url);
         } catch {
-          // If a dept has no incidents endpoint for some reason, don't kill dashboard
           return [];
         }
       })
@@ -197,6 +220,9 @@ export default async function DashboardPage() {
                 <code className="rounded bg-gray-100 px-1">
                   {base}/api/v1/departments/{"{id}"}/incidents/
                 </code>
+              </li>
+              <li>
+                <code className="rounded bg-gray-100 px-1">{healthUrl}</code>
               </li>
             </ul>
           </div>
