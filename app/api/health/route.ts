@@ -1,23 +1,16 @@
-import { NextRequest, NextResponse } from "next/server";
+// app/api/health/route.ts
+import { NextResponse } from "next/server";
 import { backendBaseUrl, requireDemoAuth } from "../_utils";
 
-export async function GET(req: NextRequest) {
-  const auth = await requireDemoAuth(req);
+export async function GET() {
+  const auth = await requireDemoAuth();
   if (!auth.ok) {
-    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+    return NextResponse.json({ detail: "Unauthorized" }, { status: 401 });
   }
 
-  const backend = backendBaseUrl();
-  if (!backend) {
-    return NextResponse.json({ ok: false, error: "missing BACKEND_URL" }, { status: 500 });
-  }
-
-  // FastAPI always has this when running
-  const res = await fetch(`${backend}/openapi.json`, { cache: "no-store" });
-
+  // This is a "frontend health" endpoint that also tells the UI what backend it's pointed at
   return NextResponse.json({
-    ok: res.ok,
-    status: res.status,
-    backend,
+    ok: true,
+    backend: backendBaseUrl(),
   });
 }
