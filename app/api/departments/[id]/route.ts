@@ -3,38 +3,56 @@ import { backendBaseUrl, requireDemoAuth } from "../../_utils";
 
 type Ctx = { params: Promise<{ id: string }> };
 
-// GET /api/departments/:id  -> proxies to backend GET /api/v1/departments/:id
-export async function GET(req: NextRequest, ctx: Ctx) {
-  const auth = await requireDemoAuth(req);
+export async function GET(_req: NextRequest, ctx: Ctx) {
+  const auth = await requireDemoAuth();
   if (!auth.ok) {
-    return NextResponse.json({ detail: "Unauthorized" }, { status: 401 });
+    return NextResponse.json({ detail: "Auth required" }, { status: 401 });
   }
 
   const { id } = await ctx.params;
 
   const res = await fetch(`${backendBaseUrl()}/api/v1/departments/${id}`, {
+    method: "GET",
     headers: { Accept: "application/json" },
     cache: "no-store",
   });
 
-  const bodyText = await res.text();
-  try {
-    const data = bodyText ? JSON.parse(bodyText) : null;
-    return NextResponse.json(data, { status: res.status });
-  } catch {
-    // backend returned non-JSON (or empty)
-    return new NextResponse(bodyText || "", {
-      status: res.status,
-      headers: { "content-type": "text/plain" },
-    });
-  }
+  const text = await res.text();
+  return new NextResponse(text, {
+    status: res.status,
+    headers: { "Content-Type": res.headers.get("content-type") ?? "application/json" },
+  });
 }
 
-// DELETE /api/departments/:id -> proxies to backend DELETE /api/v1/departments/:id
-export async function DELETE(req: NextRequest, ctx: Ctx) {
-  const auth = await requireDemoAuth(req);
+export async function PUT(req: NextRequest, ctx: Ctx) {
+  const auth = await requireDemoAuth();
   if (!auth.ok) {
-    return NextResponse.json({ detail: "Unauthorized" }, { status: 401 });
+    return NextResponse.json({ detail: "Auth required" }, { status: 401 });
+  }
+
+  const { id } = await ctx.params;
+  const body = await req.text();
+
+  const res = await fetch(`${backendBaseUrl()}/api/v1/departments/${id}`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": req.headers.get("content-type") ?? "application/json",
+      Accept: "application/json",
+    },
+    body,
+  });
+
+  const text = await res.text();
+  return new NextResponse(text, {
+    status: res.status,
+    headers: { "Content-Type": res.headers.get("content-type") ?? "application/json" },
+  });
+}
+
+export async function DELETE(_req: NextRequest, ctx: Ctx) {
+  const auth = await requireDemoAuth();
+  if (!auth.ok) {
+    return NextResponse.json({ detail: "Auth required" }, { status: 401 });
   }
 
   const { id } = await ctx.params;
@@ -44,15 +62,9 @@ export async function DELETE(req: NextRequest, ctx: Ctx) {
     headers: { Accept: "application/json" },
   });
 
-  const bodyText = await res.text();
-  // Return JSON if possible, otherwise return a small JSON status
-  try {
-    const data = bodyText ? JSON.parse(bodyText) : { ok: res.ok };
-    return NextResponse.json(data, { status: res.status });
-  } catch {
-    return NextResponse.json(
-      { ok: res.ok, raw: bodyText || "" },
-      { status: res.status }
-    );
-  }
+  const text = await res.text();
+  return new NextResponse(text, {
+    status: res.status,
+    headers: { "Content-Type": res.headers.get("content-type") ?? "application/json" },
+  });
 }
