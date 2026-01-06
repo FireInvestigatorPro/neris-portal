@@ -1,49 +1,43 @@
+// app/api/departments/[id]/incidents/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { backendBaseUrl, requireDemoAuth } from "../../../_utils";
 
-type Ctx = { params: Promise<{ id: string }> };
-
-// GET /api/departments/:id/incidents  -> proxies backend GET /api/v1/departments/:id/incidents/
-export async function GET(_req: NextRequest, ctx: Ctx) {
+export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   const auth = await requireDemoAuth();
-  if (!auth.ok) return auth.response;
+  if (!auth.ok) return NextResponse.json({ detail: "Unauthorized" }, { status: 401 });
 
   const { id } = await ctx.params;
 
-  const res = await fetch(
-    `${backendBaseUrl()}/api/v1/departments/${id}/incidents/`,
-    { cache: "no-store" }
-  );
+  const url = `${backendBaseUrl()}/api/v1/departments/${encodeURIComponent(id)}/incidents/`;
 
+  const res = await fetch(url, { headers: { accept: "application/json" }, cache: "no-store" });
   const text = await res.text();
-  try {
-    return NextResponse.json(JSON.parse(text), { status: res.status });
-  } catch {
-    return new NextResponse(text, { status: res.status });
-  }
+
+  return new NextResponse(text, {
+    status: res.status,
+    headers: { "content-type": res.headers.get("content-type") ?? "application/json" },
+  });
 }
 
-// POST /api/departments/:id/incidents -> proxies backend POST /api/v1/departments/:id/incidents/
-export async function POST(req: NextRequest, ctx: Ctx) {
+export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   const auth = await requireDemoAuth();
-  if (!auth.ok) return auth.response;
+  if (!auth.ok) return NextResponse.json({ detail: "Unauthorized" }, { status: 401 });
 
   const { id } = await ctx.params;
-  const body = await req.json();
+  const payload = await req.json();
 
-  const res = await fetch(
-    `${backendBaseUrl()}/api/v1/departments/${id}/incidents/`,
-    {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    }
-  );
+  const url = `${backendBaseUrl()}/api/v1/departments/${encodeURIComponent(id)}/incidents/`;
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify(payload),
+  });
 
   const text = await res.text();
-  try {
-    return NextResponse.json(JSON.parse(text), { status: res.status });
-  } catch {
-    return new NextResponse(text, { status: res.status });
-  }
+
+  return new NextResponse(text, {
+    status: res.status,
+    headers: { "content-type": res.headers.get("content-type") ?? "application/json" },
+  });
 }
