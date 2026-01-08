@@ -3,15 +3,18 @@ import { headers } from "next/headers";
 
 async function getBackendHealth() {
   try {
-    const h = headers();
+    const h = await headers(); // <-- FIX: await headers()
+
     const proto = h.get("x-forwarded-proto") ?? "https";
     const host = h.get("x-forwarded-host") ?? h.get("host") ?? "";
     const base = host ? `${proto}://${host}` : "";
+
     const res = await fetch(`${base}/api/health`, { cache: "no-store" });
-    if (!res.ok) throw new Error();
-    return "online";
+    if (!res.ok) throw new Error("health not ok");
+
+    return "online" as const;
   } catch {
-    return "down";
+    return "down" as const;
   }
 }
 
