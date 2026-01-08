@@ -9,6 +9,7 @@ export default function LoginClient() {
   const nextPath = useMemo(() => sp.get("next") ?? "/dashboard", [sp]);
 
   const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
@@ -21,17 +22,18 @@ export default function LoginClient() {
       const res = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ email }),
+        body: JSON.stringify({ email, password }),
       });
 
       if (!res.ok) {
         const text = await res.text().catch(() => "");
+        // Show server message (yours is {"detail":"Invalid credentials."})
         setMsg(text || `Login failed (${res.status}).`);
         setBusy(false);
         return;
       }
 
-      // ✅ Most reliable: full navigation so the server definitely sees the new cookie
+      // Full reload so cookie is definitely present for server routes
       window.location.assign(nextPath);
     } catch (err: any) {
       setMsg(err?.message ?? "Failed to fetch.");
@@ -49,6 +51,18 @@ export default function LoginClient() {
           value={email}
           onChange={(e) => setEmail(e.target.value)}
           autoComplete="email"
+        />
+      </label>
+
+      <label className="block text-sm text-slate-200">
+        Password (demo)
+        <input
+          className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-50 outline-none focus:border-orange-500"
+          placeholder="demo password"
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          autoComplete="current-password"
         />
       </label>
 

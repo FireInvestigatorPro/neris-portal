@@ -1,34 +1,41 @@
+// app/api/auth/login/route.ts
 import { NextResponse } from "next/server";
+
+const COOKIE_NAME = "neris_demo_auth"; // must match what your requireDemoAuth checks
 
 export async function POST(req: Request) {
   const body = await req.json().catch(() => ({}));
-  const email = String(body?.email ?? "").trim().toLowerCase();
-  const password = String(body?.password ?? "");
+  const email = String(body?.email ?? "").trim();
+  const password = String(body?.password ?? "").trim();
 
-  const okEmail = (process.env.DEMO_LOGIN_EMAIL ?? "").trim().toLowerCase();
-  const okPass = process.env.DEMO_LOGIN_PASSWORD ?? "";
-  const token = process.env.DEMO_ACCESS_TOKEN ?? "";
+  const expectedEmail = (process.env.DEMO_LOGIN_EMAIL ?? "").trim();
+  const expectedPassword = (process.env.DEMO_LOGIN_PASSWORD ?? "").trim();
 
-  if (!okEmail || !okPass || !token) {
-    return NextResponse.json(
-      { detail: "Server auth is not configured (missing env vars)." },
-      { status: 500 }
-    );
-  }
+  // Optional “token-style” demo password (single shared secret)
+  const accessToken = (process.env.DEMO_ACCESS_TOKEN ?? "").trim();
 
-  if (email !== okEmail || password !== okPass) {
+  const okEmailPass =
+    !!expectedEmail &&
+    !!expectedPassword &&
+    email.toLowerCase() === expectedEmail.toLowerCase() &&
+    password === expectedPassword;
+
+  const okToken = !!accessToken && password === accessToken;
+
+  if (!okEmailPass && !okToken) {
     return NextResponse.json({ detail: "Invalid credentials." }, { status: 401 });
   }
 
-  const res = NextResponse.json({ ok: true });
+  // Store the access token (or password) as the cookie value so downstream checks can compare
+  const cookieValue = accessToken || expectedPassword || password;
 
-  // HttpOnly cookie so it can't be set via JS console
-  res.cookies.set("neris_demo_auth", token, {
+  const res = NextResponse.json({ ok: true });
+  res.cookies.set(COOKIE_NAME, cookieValue, {
     httpOnly: true,
-    secure: true,
     sameSite: "lax",
+    secure: true,
     path: "/",
-    maxAge: 60 * 60 * 12, // 12 hours
+    maxAge: 60 * 60 * 8, // 8 hours
   });
 
   return res;
