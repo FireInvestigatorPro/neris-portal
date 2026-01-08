@@ -24,6 +24,21 @@ type ApiIncident = {
   updated_at?: string;
 };
 
+type DemoAttachment = {
+  id: string;
+  name: string;
+  size: number;
+  type: string;
+  addedAt: string; // ISO
+};
+
+type DemoCaseData = {
+  notes: string;
+  tags: string[];
+  attachments: DemoAttachment[];
+  updatedAt: string; // ISO
+};
+
 function joinLocation(inc: ApiIncident) {
   return [inc.address, inc.city, inc.state].filter(Boolean).join(", ") || "—";
 }
@@ -80,6 +95,44 @@ function DateBlock({ iso }: { iso?: string | null }) {
   );
 }
 
+function caseStorageKey(incidentId: number) {
+  return `neris_demo_case_incident_${incidentId}`;
+}
+
+function loadCaseData(incidentId: number): DemoCaseData {
+  if (typeof window === "undefined") {
+    return { notes: "", tags: [], attachments: [], updatedAt: new Date(0).toISOString() };
+  }
+  try {
+    const raw = localStorage.getItem(caseStorageKey(incidentId));
+    if (!raw) return { notes: "", tags: [], attachments: [], updatedAt: new Date(0).toISOString() };
+    const parsed = JSON.parse(raw) as Partial<DemoCaseData>;
+    return {
+      notes: typeof parsed.notes === "string" ? parsed.notes : "",
+      tags: Array.isArray(parsed.tags) ? parsed.tags.filter((t) => typeof t === "string") : [],
+      attachments: Array.isArray(parsed.attachments)
+        ? parsed.attachments.filter((a) => a && typeof a === "object") as DemoAttachment[]
+        : [],
+      updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : new Date(0).toISOString(),
+    };
+  } catch {
+    return { notes: "", tags: [], attachments: [], updatedAt: new Date(0).toISOString() };
+  }
+}
+
+function saveCaseData(incidentId: number, data: DemoCaseData) {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(caseStorageKey(incidentId), JSON.stringify(data));
+}
+
+function normalizeTag(input: string) {
+  return input
+    .trim()
+    .replace(/\s+/g, " ")
+    .replace(/^#/, "")
+    .slice(0, 32);
+}
+
 export default function IncidentDetailPage() {
   const params = useParams<{ id: string }>();
   const searchParams = useSearchParams();
@@ -99,6 +152,16 @@ export default function IncidentDetailPage() {
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Demo “case file” data (localStorage)
+  const [caseData, setCaseData] = useState<DemoCaseData>({
+    notes: "",
+    tags: [],
+    attachments: [],
+    updatedAt: new Date(0).toISOString(),
+  });
+
+  const [tagInput, setTagInput] = useState("");
+
   const isValidIncidentId = useMemo(
     () => Number.isFinite(incidentId) && incidentId > 0,
     [incidentId]
@@ -108,6 +171,19 @@ export default function IncidentDetailPage() {
     () => departmentId !== null && Number.isFinite(departmentId) && departmentId > 0,
     [departmentId]
   );
+
+  // Load local “case file” once incident id is known
+  useEffect(() => {
+    if (!isValidIncidentId) return;
+    const data = loadCaseData(incidentId);
+    setCaseData(data);
+  }, [incidentId, isValidIncidentId]);
+
+  // Persist local “case file”
+  useEffect(() => {
+    if (!isValidIncidentId) return;
+    saveCaseData(incidentId, caseData);
+  }, [caseData, incidentId, isValidIncidentId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -294,6 +370,54 @@ export default function IncidentDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [incidentIdStr]);
 
+  function updateCase(partial: Partial<DemoCaseData>) {
+    setCaseData((prev) => ({
+      ...prev,
+      ...partial,
+      updatedAt: new Date().toISOString(),
+    }));
+  }
+
+  function addTag(raw: string) {
+    const t = normalizeTag(raw);
+    if (!t) return;
+    updateCase({
+      tags: Array.from(new Set([...(caseData.tags ?? []), t])).slice(0, 12),
+    });
+    setTagInput("");
+  }
+
+  function removeTag(tag: string) {
+    updateCase({ tags: (caseData.tags ?? []).filter((t) => t !== tag) });
+  }
+
+  function onPickFiles(files: FileList | null) {
+    if (!files || files.length === 0) return;
+
+    const next: DemoAttachment[] = [];
+    for (const f of Array.from(files)) {
+      next.push({
+        id: `${Date.now()}_${Math.random().toString(16).slice(2)}`,
+        name: f.name,
+        size: f.size,
+        type: f.type || "application/octet-stream",
+        addedAt: new Date().toISOString(),
+      });
+    }
+
+    updateCase({
+      attachments: [...(caseData.attachments ?? []), ...next].slice(0, 25),
+    });
+  }
+
+  function removeAttachment(attId: string) {
+    updateCase({
+      attachments: (caseData.attachments ?? []).filter((a) => a.id !== attId),
+    });
+  }
+
+  const caseUpdated = fmtLocalUtc(caseData.updatedAt);
+
   return (
     <section className="space-y-4">
       <div className="flex items-center justify-between">
@@ -335,63 +459,216 @@ export default function IncidentDetailPage() {
       )}
 
       {!loading && incident && (
-        <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-4 text-xs text-slate-200">
-          <div className="flex flex-col gap-3">
-            <div className="text-sm font-semibold text-slate-100">
-              {incident.neris_incident_id
-                ? `NERIS Incident: ${incident.neris_incident_id}`
-                : `Incident #${incident.id}`}
-            </div>
+        <div className="space-y-4">
+          {/* Core Incident Summary */}
+          <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-4 text-xs text-slate-200">
+            <div className="flex flex-col gap-3">
+              <div className="text-sm font-semibold text-slate-100">
+                {incident.neris_incident_id
+                  ? `NERIS Incident: ${incident.neris_incident_id}`
+                  : `Incident #${incident.id}`}
+              </div>
 
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
-                <div className="text-[10px] uppercase tracking-wide text-slate-400">Occurred</div>
-                <DateBlock iso={incident.occurred_at} />
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
+                  <div className="text-[10px] uppercase tracking-wide text-slate-400">Occurred</div>
+                  <DateBlock iso={incident.occurred_at} />
+                </div>
+
+                <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
+                  <div className="text-[10px] uppercase tracking-wide text-slate-400">Location</div>
+                  <div className="text-slate-200">{joinLocation(incident)}</div>
+                </div>
               </div>
 
               <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
-                <div className="text-[10px] uppercase tracking-wide text-slate-400">Location</div>
-                <div className="text-slate-200">{joinLocation(incident)}</div>
+                <div className="text-[10px] uppercase tracking-wide text-slate-400">Department</div>
+                <div className="text-slate-200">
+                  {department ? (
+                    <>
+                      <Link
+                        href={`/departments/${department.id}`}
+                        className="hover:text-orange-300 underline underline-offset-2"
+                      >
+                        {department.name}
+                      </Link>{" "}
+                      <span className="text-slate-400">(ID {department.id})</span>
+                    </>
+                  ) : (
+                    <>ID {incident.department_id}</>
+                  )}
+                </div>
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
+                  <div className="text-[10px] uppercase tracking-wide text-slate-400">Created</div>
+                  <DateBlock iso={incident.created_at} />
+                </div>
+                <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
+                  <div className="text-[10px] uppercase tracking-wide text-slate-400">Updated</div>
+                  <DateBlock iso={incident.updated_at} />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Case File Panels */}
+          <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div>
+                <div className="text-sm font-semibold text-slate-100">Case File</div>
+                <div className="mt-1 text-[11px] text-slate-400">
+                  Demo mode: Notes / Tags / Attachments are stored in your browser (localStorage), not the backend yet.
+                </div>
+              </div>
+              <div className="text-right text-[11px] text-slate-400">
+                <div className="text-[10px] uppercase tracking-wide text-slate-500">Last updated</div>
+                <div className="text-slate-200">{caseUpdated.local}</div>
+                <div className="text-[10px] text-slate-500">{caseUpdated.utc}</div>
               </div>
             </div>
 
-            <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
-              <div className="text-[10px] uppercase tracking-wide text-slate-400">Department</div>
-              <div className="text-slate-200">
-                {department ? (
-                  <>
-                    <Link
-                      href={`/departments/${department.id}`}
-                      className="hover:text-orange-300 underline underline-offset-2"
+            <div className="mt-4 grid gap-4 lg:grid-cols-3">
+              {/* Notes */}
+              <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3 lg:col-span-2">
+                <div className="flex items-center justify-between">
+                  <div className="text-[10px] uppercase tracking-wide text-slate-400">Notes</div>
+                  <div className="text-[10px] text-slate-500">NFPA 921-aligned narrative</div>
+                </div>
+
+                <textarea
+                  value={caseData.notes}
+                  onChange={(e) => updateCase({ notes: e.target.value })}
+                  placeholder="Add investigation notes: scene observations, witness statements, preservation steps, hypotheses, etc."
+                  className="mt-2 h-44 w-full resize-none rounded-md border border-slate-800 bg-slate-950/50 p-2 text-xs text-slate-100 placeholder:text-slate-500 focus:border-orange-400 focus:outline-none"
+                />
+
+                <div className="mt-2 text-[11px] text-slate-400">
+                  Tip: keep it “facts first” → “analysis” → “next steps” so it reads clean in court.
+                </div>
+              </div>
+
+              {/* Tags + Attachments */}
+              <div className="space-y-4">
+                {/* Tags */}
+                <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
+                  <div className="flex items-center justify-between">
+                    <div className="text-[10px] uppercase tracking-wide text-slate-400">Tags</div>
+                    <div className="text-[10px] text-slate-500">{(caseData.tags ?? []).length}/12</div>
+                  </div>
+
+                  <div className="mt-2 flex gap-2">
+                    <input
+                      value={tagInput}
+                      onChange={(e) => setTagInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          addTag(tagInput);
+                        }
+                      }}
+                      placeholder="e.g., electrical, kitchen, injuries"
+                      className="w-full rounded-md border border-slate-800 bg-slate-950/50 px-2 py-2 text-xs text-slate-100 placeholder:text-slate-500 focus:border-orange-400 focus:outline-none"
+                    />
+                    <button
+                      onClick={() => addTag(tagInput)}
+                      className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100 hover:border-orange-400"
                     >
-                      {department.name}
-                    </Link>{" "}
-                    <span className="text-slate-400">(ID {department.id})</span>
-                  </>
-                ) : (
-                  <>ID {incident.department_id}</>
-                )}
+                      Add
+                    </button>
+                  </div>
+
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {(caseData.tags ?? []).length === 0 ? (
+                      <div className="text-[11px] text-slate-500">No tags yet.</div>
+                    ) : (
+                      (caseData.tags ?? []).map((t) => (
+                        <button
+                          key={t}
+                          onClick={() => removeTag(t)}
+                          className="rounded-full border border-slate-800 bg-slate-900 px-2 py-1 text-[11px] text-slate-100 hover:border-orange-400"
+                          title="Click to remove"
+                        >
+                          #{t}
+                        </button>
+                      ))
+                    )}
+                  </div>
+
+                  <div className="mt-2 text-[11px] text-slate-500">
+                    Use tags to filter later: origin-area, utilities, suppression, evidence, etc.
+                  </div>
+                </div>
+
+                {/* Attachments */}
+                <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
+                  <div className="flex items-center justify-between">
+                    <div className="text-[10px] uppercase tracking-wide text-slate-400">Attachments</div>
+                    <div className="text-[10px] text-slate-500">
+                      {(caseData.attachments ?? []).length}/25
+                    </div>
+                  </div>
+
+                  <div className="mt-2">
+                    <input
+                      type="file"
+                      multiple
+                      onChange={(e) => {
+                        onPickFiles(e.target.files);
+                        e.currentTarget.value = "";
+                      }}
+                      className="block w-full text-xs text-slate-300 file:mr-3 file:rounded-md file:border file:border-slate-700 file:bg-slate-900 file:px-3 file:py-2 file:text-xs file:text-slate-100 hover:file:border-orange-400"
+                    />
+                    <div className="mt-2 text-[11px] text-slate-500">
+                      Demo stores filename/size/type only (no upload yet).
+                    </div>
+                  </div>
+
+                  <div className="mt-3 space-y-2">
+                    {(caseData.attachments ?? []).length === 0 ? (
+                      <div className="text-[11px] text-slate-500">No attachments yet.</div>
+                    ) : (
+                      (caseData.attachments ?? []).slice().reverse().map((a) => {
+                        const added = fmtLocalUtc(a.addedAt);
+                        const kb = Math.max(1, Math.round(a.size / 1024));
+                        return (
+                          <div
+                            key={a.id}
+                            className="rounded-md border border-slate-800 bg-slate-950/40 p-2"
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="min-w-0">
+                                <div className="truncate text-xs text-slate-100">{a.name}</div>
+                                <div className="text-[11px] text-slate-400">
+                                  {a.type} · {kb} KB
+                                </div>
+                                <div className="text-[10px] text-slate-500">
+                                  Added: {added.local} ({added.utc})
+                                </div>
+                              </div>
+                              <button
+                                onClick={() => removeAttachment(a.id)}
+                                className="shrink-0 rounded-md border border-slate-800 bg-slate-900 px-2 py-1 text-[11px] text-slate-100 hover:border-orange-400"
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
               </div>
             </div>
 
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
-                <div className="text-[10px] uppercase tracking-wide text-slate-400">Created</div>
-                <DateBlock iso={incident.created_at} />
-              </div>
-              <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
-                <div className="text-[10px] uppercase tracking-wide text-slate-400">Updated</div>
-                <DateBlock iso={incident.updated_at} />
-              </div>
-            </div>
-
-            <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
-              <div className="text-[10px] uppercase tracking-wide text-slate-400">Next demo add-ons</div>
+            {/* Next step hint */}
+            <div className="mt-4 rounded-md border border-slate-800 bg-slate-950/30 p-3">
+              <div className="text-[10px] uppercase tracking-wide text-slate-400">Next (Phase 1)</div>
               <div className="mt-1 text-[11px] text-slate-300">
-                Tomorrow: add panels for <span className="text-slate-100">Notes</span>,{" "}
-                <span className="text-slate-100">Tags</span>, and{" "}
-                <span className="text-slate-100">Attachments</span> (even if attachments are “mock”).
-                Those three make this feel enterprise immediately.
+                After this looks good: we wire Notes/Tags/Attachments to real backend tables
+                (so departments can collaborate + export).
               </div>
             </div>
           </div>
