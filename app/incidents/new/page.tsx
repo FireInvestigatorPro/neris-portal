@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { Suspense, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 
@@ -19,7 +19,7 @@ function toIsoOrNow(input: string) {
   return d.toISOString();
 }
 
-export default function NewIncidentPage() {
+function NewIncidentInner() {
   const router = useRouter();
   const search = useSearchParams();
 
@@ -45,7 +45,9 @@ export default function NewIncidentPage() {
     setError(null);
 
     if (!isValidDepartment) {
-      setError('Missing/invalid departmentId. Go back and select a department first.');
+      setError(
+        'Missing/invalid departmentId. Go back and select a department first.'
+      );
       return;
     }
 
@@ -64,8 +66,8 @@ export default function NewIncidentPage() {
 
     setSubmitting(true);
     try {
-      // This expects your API route to exist:
-      // app/api/departments/[id]/incidents/route.ts  ->  /api/departments/:id/incidents
+      // Expects your Next API route:
+      // /api/departments/:id/incidents  (POST)
       const res = await fetch(`/api/departments/${departmentId}/incidents`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -77,12 +79,10 @@ export default function NewIncidentPage() {
         throw new Error(`Create failed (${res.status}). ${text}`);
       }
 
-      // Expect backend-style JSON with id
       const created = text ? JSON.parse(text) : null;
       const newId = created?.id;
 
       if (!newId) {
-        // If your API returns a different shape, still succeed and go back to dept incidents
         router.push(`/departments/${departmentId}/incidents`);
         return;
       }
@@ -99,12 +99,20 @@ export default function NewIncidentPage() {
     <section className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold text-orange-400">New Incident</h1>
+          <h1 className="text-2xl font-semibold text-orange-400">
+            New Incident
+          </h1>
           <p className="text-xs text-slate-300">
             {isValidDepartment ? (
-              <>Creating incident for Dept ID: <span className="text-slate-100">{departmentId}</span></>
+              <>
+                Creating incident for Dept ID:{" "}
+                <span className="text-slate-100">{departmentId}</span>
+              </>
             ) : (
-              <>Select a department first (missing <span className="text-slate-100">departmentId</span>).</>
+              <>
+                Select a department first (missing{" "}
+                <span className="text-slate-100">departmentId</span>).
+              </>
             )}
           </p>
         </div>
@@ -130,13 +138,13 @@ export default function NewIncidentPage() {
 
       {error && (
         <div className="rounded-lg border border-red-900/50 bg-red-950/30 p-4">
-          <p className="text-xs text-red-300 whitespace-pre-wrap">{error}</p>
+          <p className="text-xs whitespace-pre-wrap text-red-300">{error}</p>
         </div>
       )}
 
       <form
         onSubmit={onSubmit}
-        className="rounded-lg border border-slate-800 bg-slate-900/60 p-4 space-y-4"
+        className="space-y-4 rounded-lg border border-slate-800 bg-slate-900/60 p-4"
       >
         <div className="grid gap-4 sm:grid-cols-2">
           <div>
@@ -161,7 +169,7 @@ export default function NewIncidentPage() {
             <input
               value={nerisIncidentId}
               onChange={(e) => setNerisIncidentId(e.target.value)}
-              placeholder='e.g., 2026-FR-001'
+              placeholder="e.g., 2026-FR-001"
               className="mt-1 w-full rounded-md border border-slate-800 bg-slate-950/50 px-2 py-2 text-xs text-slate-100 placeholder:text-slate-600 focus:border-orange-400 focus:outline-none"
             />
           </div>
@@ -216,5 +224,19 @@ export default function NewIncidentPage() {
         </div>
       </form>
     </section>
+  );
+}
+
+export default function NewIncidentPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4 text-xs text-slate-300">
+          Loading…
+        </div>
+      }
+    >
+      <NewIncidentInner />
+    </Suspense>
   );
 }
