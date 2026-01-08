@@ -24,14 +24,6 @@ type ApiIncident = {
   updated_at?: string;
 };
 
-function formatDateTime(iso?: string | null) {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return String(iso);
-  // Keep it simple & consistent for demo (UTC-ish)
-  return d.toISOString().replace("T", " ").replace("Z", " UTC");
-}
-
 function joinLocation(inc: ApiIncident) {
   return [inc.address, inc.city, inc.state].filter(Boolean).join(", ") || "—";
 }
@@ -47,6 +39,45 @@ async function safeJson(res: Response) {
 function getApiBase() {
   const fallback = "https://infernointelai-backend.onrender.com";
   return process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") ?? fallback;
+}
+
+function fmtLocalUtc(iso?: string | null) {
+  if (!iso) return { local: "—", utc: "—" };
+
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return { local: String(iso), utc: String(iso) };
+
+  const local = new Intl.DateTimeFormat(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    timeZoneName: "short",
+  }).format(d);
+
+  const utc = new Intl.DateTimeFormat(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    timeZone: "UTC",
+  }).format(d);
+
+  return { local, utc: `${utc} UTC` };
+}
+
+function DateBlock({ iso }: { iso?: string | null }) {
+  const { local, utc } = fmtLocalUtc(iso);
+  return (
+    <div className="leading-tight">
+      <div className="text-slate-200">{local}</div>
+      <div className="text-[10px] text-slate-400">{utc}</div>
+    </div>
+  );
 }
 
 export default function IncidentDetailPage() {
@@ -94,10 +125,7 @@ export default function IncidentDetailPage() {
         return;
       }
 
-      // ------------------------------------------------------------
-      // 1) BEST PATH FOR YOUR CURRENT BACKEND:
-      //    If we have departmentId, fetch that department’s incidents and find the match.
-      // ------------------------------------------------------------
+      // 1) Best path: if we have departmentId, fetch that department’s incidents and find the match.
       if (isValidDepartmentId && departmentId) {
         try {
           setStatusMsg("Loading incident from department…");
@@ -131,15 +159,13 @@ export default function IncidentDetailPage() {
           const incJson = await safeJson(incRes);
           const items = Array.isArray((incJson as any)?.items) ? (incJson as any).items : incJson;
 
-          if (!Array.isArray(items)) {
-            throw new Error("Unexpected incidents response shape.");
-          }
+          if (!Array.isArray(items)) throw new Error("Unexpected incidents response shape.");
 
-          const match = items.find((x: any) => Number(x?.id) === incidentId) as ApiIncident | undefined;
+          const match = items.find((x: any) => Number(x?.id) === incidentId) as
+            | ApiIncident
+            | undefined;
 
-          if (!match) {
-            throw new Error("Incident not found in that department.");
-          }
+          if (!match) throw new Error("Incident not found in that department.");
 
           if (!cancelled) {
             setIncident(match);
@@ -157,9 +183,7 @@ export default function IncidentDetailPage() {
         }
       }
 
-      // ------------------------------------------------------------
       // 2) Optional fast path: if backend supports GET /api/v1/incidents/{id}
-      // ------------------------------------------------------------
       try {
         setStatusMsg("Loading incident…");
 
@@ -172,7 +196,6 @@ export default function IncidentDetailPage() {
           if (!cancelled && data) {
             setIncident(data);
 
-            // Try to also load the department name for nicer display
             const deptRes = await fetch(`${apiBase}/api/v1/departments/${data.department_id}`, {
               cache: "no-store",
             });
@@ -195,12 +218,10 @@ export default function IncidentDetailPage() {
           }
         }
       } catch {
-        // swallow and try scan fallback
+        // ignore and try scan fallback
       }
 
-      // ------------------------------------------------------------
       // 3) Demo-scale fallback: scan departments and search incidents for the ID
-      // ------------------------------------------------------------
       try {
         setStatusMsg("Searching incident across departments…");
 
@@ -220,6 +241,9 @@ export default function IncidentDetailPage() {
           neris_department_id: d.neris_department_id ?? null,
         }));
 
+        let foundIncident: ApiIncident | null = null;
+        let foundDept: Department | null = null;
+
         for (const d of departments) {
           if (cancelled) return;
 
@@ -228,28 +252,29 @@ export default function IncidentDetailPage() {
           const incRes = await fetch(`${apiBase}/api/v1/departments/${d.id}/incidents/`, {
             cache: "no-store",
           });
-
           if (!incRes.ok) continue;
 
           const incJson = await safeJson(incRes);
           const incItems = Array.isArray((incJson as any)?.items) ? (incJson as any).items : incJson;
-
           if (!Array.isArray(incItems)) continue;
 
-          const match = incItems.find((x: any) => Number(x?.id) === incidentId) as ApiIncident | undefined;
+          const match = incItems.find((x: any) => Number(x?.id) === incidentId) as
+            | ApiIncident
+            | undefined;
 
           if (match) {
-            if (!cancelled) {
-              setIncident(match);
-              setDepartment(d);
-            }
+            foundIncident = match;
+            foundDept = d;
             break;
           }
         }
 
         if (!cancelled) {
-          if (!incident) {
+          if (!foundIncident) {
             setError("Incident not found. It may have been deleted, or not accessible.");
+          } else {
+            setIncident(foundIncident);
+            setDepartment(foundDept);
           }
         }
       } catch (e: any) {
@@ -263,7 +288,6 @@ export default function IncidentDetailPage() {
     }
 
     load();
-
     return () => {
       cancelled = true;
     };
@@ -312,43 +336,62 @@ export default function IncidentDetailPage() {
 
       {!loading && incident && (
         <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-4 text-xs text-slate-200">
-          <div className="flex flex-col gap-2">
+          <div className="flex flex-col gap-3">
             <div className="text-sm font-semibold text-slate-100">
               {incident.neris_incident_id
                 ? `NERIS Incident: ${incident.neris_incident_id}`
                 : `Incident #${incident.id}`}
             </div>
 
-            <div className="text-[11px] text-slate-400">
-              Occurred: <span className="text-slate-200">{formatDateTime(incident.occurred_at)}</span>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
+                <div className="text-[10px] uppercase tracking-wide text-slate-400">Occurred</div>
+                <DateBlock iso={incident.occurred_at} />
+              </div>
+
+              <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
+                <div className="text-[10px] uppercase tracking-wide text-slate-400">Location</div>
+                <div className="text-slate-200">{joinLocation(incident)}</div>
+              </div>
             </div>
 
-            <div className="text-[11px] text-slate-400">
-              Location: <span className="text-slate-200">{joinLocation(incident)}</span>
+            <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
+              <div className="text-[10px] uppercase tracking-wide text-slate-400">Department</div>
+              <div className="text-slate-200">
+                {department ? (
+                  <>
+                    <Link
+                      href={`/departments/${department.id}`}
+                      className="hover:text-orange-300 underline underline-offset-2"
+                    >
+                      {department.name}
+                    </Link>{" "}
+                    <span className="text-slate-400">(ID {department.id})</span>
+                  </>
+                ) : (
+                  <>ID {incident.department_id}</>
+                )}
+              </div>
             </div>
 
-            <div className="text-[11px] text-slate-400">
-              Department:{" "}
-              <span className="text-slate-200">
-                {department ? `${department.name} (ID ${department.id})` : `ID ${incident.department_id}`}
-              </span>
-            </div>
-
-            <div className="mt-3 grid gap-2 sm:grid-cols-2">
+            <div className="grid gap-3 sm:grid-cols-2">
               <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
                 <div className="text-[10px] uppercase tracking-wide text-slate-400">Created</div>
-                <div className="text-xs text-slate-200">{formatDateTime(incident.created_at)}</div>
+                <DateBlock iso={incident.created_at} />
               </div>
               <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
                 <div className="text-[10px] uppercase tracking-wide text-slate-400">Updated</div>
-                <div className="text-xs text-slate-200">{formatDateTime(incident.updated_at)}</div>
+                <DateBlock iso={incident.updated_at} />
               </div>
             </div>
 
-            <div className="mt-3 rounded-md border border-slate-800 bg-slate-950/30 p-3">
-              <div className="text-[10px] uppercase tracking-wide text-slate-400">Next demo step</div>
+            <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
+              <div className="text-[10px] uppercase tracking-wide text-slate-400">Next demo add-ons</div>
               <div className="mt-1 text-[11px] text-slate-300">
-                Add “notes / tags / attachments” panels here next — that’s what will make chiefs and insurers feel the value fast.
+                Tomorrow: add panels for <span className="text-slate-100">Notes</span>,{" "}
+                <span className="text-slate-100">Tags</span>, and{" "}
+                <span className="text-slate-100">Attachments</span> (even if attachments are “mock”).
+                Those three make this feel enterprise immediately.
               </div>
             </div>
           </div>
