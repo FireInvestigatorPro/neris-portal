@@ -2,113 +2,69 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 
 export default function LoginClient() {
-  const router = useRouter();
-  const searchParams = useSearchParams();
-
-  const nextPath = useMemo(() => {
-    const n = searchParams.get("next");
-    // basic safety: only allow internal redirects
-    if (!n || !n.startsWith("/")) return "/dashboard";
-    return n;
-  }, [searchParams]);
+  const sp = useSearchParams();
+  const nextPath = useMemo(() => sp.get("next") ?? "/dashboard", [sp]);
 
   const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
-    setError(null);
     setBusy(true);
+    setMsg(null);
 
     try {
       const res = await fetch("/api/auth/login", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email }),
       });
 
       if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || `Login failed (${res.status})`);
+        const text = await res.text().catch(() => "");
+        setMsg(text || `Login failed (${res.status}).`);
+        setBusy(false);
+        return;
       }
 
-      router.push(nextPath);
-      router.refresh();
+      // ✅ Most reliable: full navigation so the server definitely sees the new cookie
+      window.location.assign(nextPath);
     } catch (err: any) {
-      setError(err?.message ?? "Login failed");
-    } finally {
+      setMsg(err?.message ?? "Failed to fetch.");
       setBusy(false);
     }
   }
 
   return (
-    <div style={{ maxWidth: 420, margin: "40px auto", padding: 24 }}>
-      <h1 style={{ fontSize: 22, marginBottom: 12 }}>Sign in</h1>
+    <form onSubmit={onSubmit} className="space-y-3">
+      <label className="block text-sm text-slate-200">
+        Email
+        <input
+          className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-50 outline-none focus:border-orange-500"
+          placeholder="you@department.gov"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          autoComplete="email"
+        />
+      </label>
 
-      <form onSubmit={onSubmit} style={{ display: "grid", gap: 10 }}>
-        <label style={{ display: "grid", gap: 6 }}>
-          <span style={{ fontSize: 13, opacity: 0.8 }}>Email</span>
-          <input
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            placeholder="you@department.gov"
-            type="email"
-            autoComplete="email"
-            required
-            style={{
-              padding: 10,
-              borderRadius: 8,
-              border: "1px solid rgba(255,255,255,0.15)",
-              background: "rgba(0,0,0,0.15)",
-            }}
-          />
-        </label>
-
-        <label style={{ display: "grid", gap: 6 }}>
-          <span style={{ fontSize: 13, opacity: 0.8 }}>Password</span>
-          <input
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            placeholder="••••••••"
-            type="password"
-            autoComplete="current-password"
-            required
-            style={{
-              padding: 10,
-              borderRadius: 8,
-              border: "1px solid rgba(255,255,255,0.15)",
-              background: "rgba(0,0,0,0.15)",
-            }}
-          />
-        </label>
-
-        {error ? (
-          <div style={{ fontSize: 13, color: "#ffb4b4" }}>{error}</div>
-        ) : null}
-
-        <button
-          type="submit"
-          disabled={busy}
-          style={{
-            padding: 10,
-            borderRadius: 10,
-            border: "1px solid rgba(255,255,255,0.2)",
-            background: "rgba(255,255,255,0.08)",
-            cursor: busy ? "not-allowed" : "pointer",
-          }}
-        >
-          {busy ? "Signing in…" : "Sign in"}
-        </button>
-
-        <div style={{ fontSize: 12, opacity: 0.7 }}>
-          After login you’ll be sent to: <code>{nextPath}</code>
+      {msg ? (
+        <div className="rounded-lg border border-red-800 bg-red-950/40 p-2 text-sm text-red-200">
+          {msg}
         </div>
-      </form>
-    </div>
+      ) : null}
+
+      <button
+        type="submit"
+        disabled={busy}
+        className="w-full rounded-lg bg-orange-600 px-3 py-2 text-sm font-semibold text-white hover:bg-orange-500 disabled:opacity-60"
+      >
+        {busy ? "Signing in…" : "Sign in"}
+      </button>
+    </form>
   );
 }
