@@ -50,10 +50,12 @@ async function fetchJson<T>(
   }
 }
 
-export default async function DashboardPage(props: {
-  searchParams?: Record<string, string | string[] | undefined>;
+export default async function DashboardPage({
+  searchParams,
+}: {
+  // ✅ Next 16: searchParams is a Promise in server components
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
-  // Protect the dashboard (demo login)
   await requireDemoAuth();
 
   const backend =
@@ -61,7 +63,18 @@ export default async function DashboardPage(props: {
     process.env.NEXT_PUBLIC_BACKEND_URL ||
     "https://infernointelai-backend.onrender.com";
 
-  // ✅ Backend status check (direct to Render backend; should NOT require demo auth)
+  // ✅ Read searchParams safely
+  const sp = (await searchParams) ?? {};
+  const rawDeptId = sp.departmentId;
+
+  const departmentId =
+    typeof rawDeptId === "string"
+      ? Number(rawDeptId)
+      : Array.isArray(rawDeptId)
+      ? Number(rawDeptId[0])
+      : NaN;
+
+  // Backend status check (direct backend reachability)
   const deptUrl = `${backend}/api/v1/departments/`;
   const deptResp = await fetchJson<Department[]>(deptUrl);
 
@@ -72,17 +85,7 @@ export default async function DashboardPage(props: {
     ? `Down (${deptResp.status})`
     : "Down";
 
-  // Departments
   const departments: Department[] = deptResp.ok ? deptResp.data : [];
-
-  // Selected department (querystring if provided, otherwise first dept)
-  const rawDeptId = props.searchParams?.departmentId;
-  const departmentId =
-    typeof rawDeptId === "string"
-      ? Number(rawDeptId)
-      : Array.isArray(rawDeptId)
-      ? Number(rawDeptId[0])
-      : NaN;
 
   const selected =
     Number.isFinite(departmentId)
@@ -102,6 +105,7 @@ export default async function DashboardPage(props: {
 
   const totalDepartments = departments.length;
   const totalIncidentsForDept = incidents.length;
+
   const latestIncident = incidents
     .slice()
     .sort(
@@ -120,7 +124,7 @@ export default async function DashboardPage(props: {
           </p>
         </div>
 
-        {/* ✅ Small backend pill badge (green/red) */}
+        {/* Small backend pill badge */}
         <div
           className={cls(
             "inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm",
@@ -136,7 +140,7 @@ export default async function DashboardPage(props: {
         </div>
       </div>
 
-      {/* ✅ Current department banner (very obvious) */}
+      {/* Current department banner */}
       <div className="mt-6 rounded-2xl border border-slate-800 bg-slate-900/40 p-4">
         <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div>
@@ -178,7 +182,7 @@ export default async function DashboardPage(props: {
           </div>
         </div>
 
-        {/* ✅ Department switcher (only shows if you have 2+ departments) */}
+        {/* Department switcher */}
         {departments.length > 1 ? (
           <div className="mt-4 flex flex-wrap items-center gap-2">
             <div className="text-xs uppercase tracking-wide text-slate-400">Switch Department</div>
@@ -188,7 +192,7 @@ export default async function DashboardPage(props: {
                 return (
                   <Link
                     key={d.id}
-                    href={`/dashboard?departmentId=${d.id}`}
+                    href={{ pathname: "/dashboard", query: { departmentId: String(d.id) } }}
                     className={cls(
                       "rounded-full border px-3 py-1 text-sm",
                       active
@@ -247,7 +251,6 @@ export default async function DashboardPage(props: {
         </div>
       </div>
 
-      {/* Notes */}
       <div className="mt-6 text-xs text-slate-500">
         Backend used: <span className="text-slate-400">{backend}</span>
       </div>
