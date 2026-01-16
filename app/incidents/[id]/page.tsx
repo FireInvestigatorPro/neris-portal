@@ -48,7 +48,6 @@ export default function IncidentsPage() {
         if (cancelled) return;
         setDepartments(data);
 
-        // default to first dept if none selected
         if (data.length && departmentId === null) {
           setDepartmentId(data[0].id);
         }
@@ -181,7 +180,7 @@ export default function IncidentsPage() {
 
                     <Link
                       className="rounded-md bg-orange-600 px-3 py-2 text-sm font-semibold hover:bg-orange-500"
-                      href={`/incidents/${i.id}?departmentId=${departmentId}`}
+                      href={`/incidents/${i.id}?departmentId=${i.department_id}`}
                     >
                       View
                     </Link>
