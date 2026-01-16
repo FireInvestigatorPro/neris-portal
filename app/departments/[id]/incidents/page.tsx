@@ -237,23 +237,30 @@ export default function IncidentsPage() {
             No incidents found for this department yet.
           </div>
         ) : (
-          incidents.map((incident) => (
-            <Link
-              key={incident.id}
-              href={`/incidents/${incident.id}`}
-              className="block rounded-lg border border-slate-800 bg-slate-900/70 p-4 text-xs hover:border-orange-400"
-            >
-              <div className="flex items-center justify-between">
-                <div className="font-semibold text-slate-100">{incident.title}</div>
-                <span className="rounded-full border border-slate-700 px-2 py-0.5 text-[10px] text-slate-300">
-                  {incident.status}
-                </span>
-              </div>
-              <div className="mt-1 text-[11px] text-slate-400">
-                {incident.location} · {incident.date}
-              </div>
-            </Link>
-          ))
+          incidents.map((incident) => {
+            const href =
+              selectedDepartmentId != null
+                ? `/incidents/${incident.id}?departmentId=${selectedDepartmentId}`
+                : `/incidents/${incident.id}`;
+
+            return (
+              <Link
+                key={incident.id}
+                href={href}
+                className="block rounded-lg border border-slate-800 bg-slate-900/70 p-4 text-xs hover:border-orange-400"
+              >
+                <div className="flex items-center justify-between">
+                  <div className="font-semibold text-slate-100">{incident.title}</div>
+                  <span className="rounded-full border border-slate-700 px-2 py-0.5 text-[10px] text-slate-300">
+                    {incident.status}
+                  </span>
+                </div>
+                <div className="mt-1 text-[11px] text-slate-400">
+                  {incident.location} · {incident.date}
+                </div>
+              </Link>
+            );
+          })
         )}
       </div>
     </section>

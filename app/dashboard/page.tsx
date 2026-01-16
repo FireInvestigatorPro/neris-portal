@@ -241,13 +241,17 @@ export default async function DashboardPage({
           <div className="mt-1 text-xs text-slate-400">
             {latestIncident ? fmtDate(latestIncident.occurred_at) : ""}
           </div>
-          {latestIncident ? (
-            <div className="mt-3">
-              <Link href={`/incidents/${latestIncident.id}`} className="text-sm text-orange-300 hover:text-orange-200">
-                View incident →
-              </Link>
-            </div>
-          ) : null}
+          {latestIncident && selected?.id ? (
+  <div className="mt-3">
+    <Link
+      href={`/incidents/${latestIncident.id}?departmentId=${selected.id}`}
+      className="text-sm text-orange-300 hover:text-orange-200"
+    >
+      View incident →
+    </Link>
+  </div>
+) : null}
+
         </div>
       </div>
 
