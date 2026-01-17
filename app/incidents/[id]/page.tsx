@@ -20,52 +20,6 @@ type Department = {
   neris_department_id?: string | null;
 };
 
-<<<<<<< HEAD
-type Incident = {
-  id: number;
-  occurred_at: string;
-  address: string;
-  city: string;
-  state: string;
-  neris_incident_id: string;
-  department_id: number;
-  created_at?: string;
-  updated_at?: string;
-};
-
-export default function IncidentsPage() {
-  const [departments, setDepartments] = useState<Department[]>([]);
-  const [departmentId, setDepartmentId] = useState<number | null>(null);
-
-  const [incidents, setIncidents] = useState<Incident[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState<string | null>(null);
-
-  const selectedDept = useMemo(
-    () => departments.find((d) => d.id === departmentId) ?? null,
-    [departments, departmentId]
-  );
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function loadDepartments() {
-      try {
-        const r = await fetch("/api/departments", { cache: "no-store" });
-        if (!r.ok) throw new Error(`Failed to load departments (${r.status})`);
-        const data = (await r.json()) as Department[];
-
-        if (cancelled) return;
-        setDepartments(data);
-
-        if (data.length && departmentId === null) {
-          setDepartmentId(data[0].id);
-        }
-      } catch (e: any) {
-        if (cancelled) return;
-        setErr(e?.message ?? "Failed to load departments");
-      }
-=======
 async function fetchJson<T>(
   url: string
 ): Promise<{ ok: true; data: T } | { ok: false; status: number; text: string }> {
@@ -74,7 +28,6 @@ async function fetchJson<T>(
     if (!res.ok) {
       const text = await res.text().catch(() => "");
       return { ok: false, status: res.status, text };
->>>>>>> parent of 6858038 (Include departmentId when linking to incident details from incidents list)
     }
     const data = (await res.json()) as T;
     return { ok: true, data };
@@ -104,29 +57,37 @@ function buildLocation(i: Incident) {
   return parts.length ? parts.join(", ") : "Unknown location";
 }
 
+function asFirstString(v: string | string[] | undefined) {
+  if (typeof v === "string") return v;
+  if (Array.isArray(v)) return v[0];
+  return undefined;
+}
+
+async function resolveMaybePromise<T>(v: Promise<T> | T | undefined): Promise<T | undefined> {
+  if (typeof v === "undefined") return undefined;
+  return await v;
+}
+
 export default async function IncidentDetailPage({
   params,
   searchParams,
 }: {
-  // ✅ Next 16: params/searchParams may be Promises in server components
+  // Next.js 16: these may be Promises in server components
   params: Promise<{ id: string }> | { id: string };
-  searchParams?: Promise<Record<string, string | string[] | undefined>> | Record<string, string | string[] | undefined>;
+  searchParams?:
+    | Promise<Record<string, string | string[] | undefined>>
+    | Record<string, string | string[] | undefined>;
 }) {
   const backend = pickBackendBaseUrl();
 
-  const p = (await params) as { id: string };
-  const sp = (await searchParams) ?? {};
-
-  const rawDeptId = sp.departmentId;
-  const departmentId =
-    typeof rawDeptId === "string"
-      ? Number(rawDeptId)
-      : Array.isArray(rawDeptId)
-      ? Number(rawDeptId[0])
-      : NaN;
+  const p = await resolveMaybePromise(params);
+  const sp = (await resolveMaybePromise(searchParams)) ?? {};
 
   const rawIncidentId = p?.id;
   const incidentIdNum = typeof rawIncidentId === "string" ? Number(rawIncidentId) : NaN;
+
+  const rawDeptId = asFirstString(sp.departmentId);
+  const departmentId = rawDeptId ? Number(rawDeptId) : NaN;
 
   // 1) Fetch incident directly by ID (preferred)
   let incident: Incident | null = null;
@@ -137,13 +98,15 @@ export default async function IncidentDetailPage({
     if (incResp.ok) {
       incident = incResp.data;
     } else {
-      fetchNote = incResp.status ? `Direct incident fetch failed (${incResp.status})` : "Direct incident fetch failed";
+      fetchNote = incResp.status
+        ? `Direct incident fetch failed (${incResp.status})`
+        : "Direct incident fetch failed";
     }
   } else {
     fetchNote = "Invalid incident id in route params.";
   }
 
-  // 2) Fallback: if direct fetch failed and we have departmentId, load dept incidents and find it
+  // 2) Fallback: if direct fetch failed AND we have departmentId, load dept incidents and find it
   if (!incident && Number.isFinite(departmentId) && Number.isFinite(incidentIdNum)) {
     const deptIncResp = await fetchJson<Incident[]>(
       `${backend}/api/v1/departments/${departmentId}/incidents/`
@@ -193,56 +156,6 @@ export default async function IncidentDetailPage({
           </div>
         </div>
 
-<<<<<<< HEAD
-      {err && (
-        <div className="rounded-xl border border-red-800 bg-red-950/40 p-4">
-          <div className="font-semibold">Couldn’t load incidents</div>
-          <div className="text-sm text-red-200 whitespace-pre-wrap">{err}</div>
-        </div>
-      )}
-
-      <div className="rounded-xl border border-slate-800 bg-slate-900/30">
-        <div className="border-b border-slate-800 px-4 py-3 text-sm font-semibold">
-          Incident List
-        </div>
-
-        <div className="p-4">
-          {loading ? (
-            <div className="text-sm text-slate-300">Loading…</div>
-          ) : incidents.length === 0 ? (
-            <div className="text-sm text-slate-300">No incidents found.</div>
-          ) : (
-            <div className="space-y-3">
-              {incidents.map((i) => (
-                <div
-                  key={i.id}
-                  className="rounded-lg border border-slate-800 bg-slate-950/40 p-4"
-                >
-                  <div className="flex items-start justify-between gap-4">
-                    <div>
-                      <div className="font-semibold">
-                        {i.address}, {i.city}, {i.state}
-                      </div>
-                      <div className="text-sm text-slate-300">
-                        Occurred: {new Date(i.occurred_at).toLocaleString()}
-                      </div>
-                      <div className="text-xs text-slate-400">
-                        NERIS Incident ID: {i.neris_incident_id}
-                      </div>
-                    </div>
-
-                    <Link
-                      className="rounded-md bg-orange-600 px-3 py-2 text-sm font-semibold hover:bg-orange-500"
-                      href={`/incidents/${i.id}?departmentId=${i.department_id}`}
-                    >
-                      View
-                    </Link>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-=======
         <div className="flex gap-3">
           <Link href="/dashboard" className="text-sm text-orange-400 hover:underline">
             ← Back to Dashboard
@@ -250,7 +163,6 @@ export default async function IncidentDetailPage({
           <Link href="/incidents" className="text-sm text-orange-400 hover:underline">
             View All Incidents →
           </Link>
->>>>>>> parent of 6858038 (Include departmentId when linking to incident details from incidents list)
         </div>
       </div>
     );
@@ -259,7 +171,8 @@ export default async function IncidentDetailPage({
   const when = fmtWhen(incident.occurred_at);
   const location = buildLocation(incident);
   const title = incident.neris_incident_id ? `Incident ${incident.neris_incident_id}` : `Incident #${incident.id}`;
-  const deptLabel = department?.name ?? (incident.department_id ? `Department #${incident.department_id}` : "Department");
+  const deptLabel =
+    department?.name ?? (incident.department_id ? `Department #${incident.department_id}` : "Department");
 
   return (
     <div className="space-y-8">
@@ -286,7 +199,8 @@ export default async function IncidentDetailPage({
       <section className="rounded-lg border border-slate-800 bg-slate-900/60 p-6">
         <h3 className="text-sm font-semibold text-orange-400">Investigation Notes</h3>
         <p className="mt-2 text-sm text-slate-300">
-          Notes entered here are structured to support NFPA 921 methodology, separating observations, analysis, and hypotheses.
+          Notes entered here are structured to support NFPA 921 methodology, separating observations, analysis, and
+          hypotheses.
         </p>
       </section>
 
@@ -312,9 +226,5 @@ function StatusPill({ status }: { status: string }) {
   const color =
     status === "Completed" ? "bg-green-600" : status === "Under Investigation" ? "bg-yellow-500" : "bg-slate-600";
 
-  return (
-    <span className={`rounded-full px-3 py-1 text-xs font-semibold text-black ${color}`}>
-      {status}
-    </span>
-  );
+  return <span className={`rounded-full px-3 py-1 text-xs font-semibold text-black ${color}`}>{status}</span>;
 }
