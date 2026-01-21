@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 
 type Department = {
@@ -23,11 +23,7 @@ type ApiIncident = {
   state: string | null;
   neris_incident_id: string | null;
 
-  // Optional (demo-safe): if/when backend provides it, we color-code by NERIS incident type.
-  // Common candidates you might expose later:
-  // - incident_type_code
-  // - incident_type
-  // - neris_incident_type_code
+  // Optional: backend may provide incident type code; used for coloring
   incident_type_code?: number | string | null;
   incident_type?: number | string | null;
   neris_incident_type_code?: number | string | null;
@@ -117,9 +113,6 @@ function asNumber(v: unknown): number | null {
   return null;
 }
 
-/**
- * Best-effort extraction. You can later standardize the backend field name.
- */
 function getIncidentTypeCode(i: ApiIncident): number | null {
   return (
     asNumber(i.incident_type_code) ??
@@ -129,36 +122,54 @@ function getIncidentTypeCode(i: ApiIncident): number | null {
   );
 }
 
-/**
- * Simple, defensible mapping:
- * - This is CATEGORY coloring, not severity or cause.
- * - Adjust ranges later to match your department’s NERIS usage.
- */
 function classifyIncident(i: ApiIncident): IncidentCategoryKey {
   const code = getIncidentTypeCode(i);
   if (code == null) return "unknown";
 
-  // Common demo ranges (you can tune later):
   if (code >= 111 && code <= 118) return "structure";
   if (code >= 130 && code <= 138) return "vehicle";
   if (code >= 140 && code <= 170) return "outside";
 
-  // If the backend eventually gives you a broader code system, keep "other" for everything else.
   return "other";
 }
 
 function categoryMeta(key: IncidentCategoryKey) {
   switch (key) {
     case "structure":
-      return { label: "Structure Fire", dot: "bg-red-500", pill: "border-red-500/30 bg-red-500/10 text-red-200" };
+      return {
+        label: "Structure Fire",
+        dot: "bg-red-500",
+        pill: "border-red-500/30 bg-red-500/10 text-red-200",
+        hex: "#ef4444",
+      };
     case "vehicle":
-      return { label: "Vehicle Fire", dot: "bg-orange-500", pill: "border-orange-500/30 bg-orange-500/10 text-orange-200" };
+      return {
+        label: "Vehicle Fire",
+        dot: "bg-orange-500",
+        pill: "border-orange-500/30 bg-orange-500/10 text-orange-200",
+        hex: "#f97316",
+      };
     case "outside":
-      return { label: "Outside Fire", dot: "bg-yellow-400", pill: "border-yellow-400/30 bg-yellow-400/10 text-yellow-100" };
+      return {
+        label: "Outside Fire",
+        dot: "bg-yellow-400",
+        pill: "border-yellow-400/30 bg-yellow-400/10 text-yellow-100",
+        hex: "#facc15",
+      };
     case "other":
-      return { label: "Other", dot: "bg-blue-500", pill: "border-blue-500/30 bg-blue-500/10 text-blue-200" };
+      return {
+        label: "Other",
+        dot: "bg-blue-500",
+        pill: "border-blue-500/30 bg-blue-500/10 text-blue-200",
+        hex: "#3b82f6",
+      };
     default:
-      return { label: "Unknown", dot: "bg-slate-400", pill: "border-slate-500/30 bg-slate-500/10 text-slate-200" };
+      return {
+        label: "Unknown",
+        dot: "bg-slate-400",
+        pill: "border-slate-500/30 bg-slate-500/10 text-slate-200",
+        hex: "#94a3b8",
+      };
   }
 }
 
@@ -168,7 +179,13 @@ function CategoryPill({ incident }: { incident: ApiIncident }) {
   const code = getIncidentTypeCode(incident);
 
   return (
-    <span className={cn("inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-[11px] font-semibold", meta.pill)}>
+    <span
+      className={cn(
+        "inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-[11px] font-semibold",
+        meta.pill
+      )}
+      title="Category coloring (not severity or cause)"
+    >
       <span className={cn("h-2 w-2 rounded-full", meta.dot)} />
       {meta.label}
       {code != null ? <span className="font-mono text-[10px] opacity-80">({code})</span> : null}
@@ -177,7 +194,7 @@ function CategoryPill({ incident }: { incident: ApiIncident }) {
 }
 
 // ----------------------
-// Hotspot Map helpers (OSM + Nominatim)
+// Hotspot Map helpers (OSM + Nominatim + Leaflet)
 // ----------------------
 
 type GeoPoint = { lat: number; lon: number };
@@ -187,7 +204,7 @@ type IncidentPin = {
   locationText: string;
   occurredAt?: string | null;
   point: GeoPoint;
-  incident: ApiIncident; // keep original so we can color-code list items
+  incident: ApiIncident;
 };
 
 function buildQueryFromIncident(i: ApiIncident) {
@@ -204,18 +221,10 @@ function osmSearchUrl(query: string) {
   return `https://www.openstreetmap.org/search?query=${encodeURIComponent(query)}`;
 }
 
-function osmEmbedUrl(lat: number, lon: number) {
-  const delta = 0.02;
-  const left = lon - delta;
-  const right = lon + delta;
-  const top = lat + delta;
-  const bottom = lat - delta;
-
-  return `https://www.openstreetmap.org/export/embed.html?bbox=${left}%2C${bottom}%2C${right}%2C${top}&layer=mapnik&marker=${lat}%2C${lon}`;
-}
-
 async function geocodeToPoint(query: string): Promise<GeoPoint | null> {
-  const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=${encodeURIComponent(query)}`;
+  const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=${encodeURIComponent(
+    query
+  )}`;
 
   const res = await fetch(url, { cache: "no-store" });
   if (!res.ok) return null;
@@ -232,6 +241,221 @@ async function geocodeToPoint(query: string): Promise<GeoPoint | null> {
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Leaflet (CDN) Hotspot Map
+ * - No npm installs
+ * - OSM tiles
+ * - Colored pins + click-through to incident detail
+ */
+function HotspotLeafletMap({
+  center,
+  pins,
+  departmentId,
+}: {
+  center: GeoPoint | null;
+  pins: IncidentPin[];
+  departmentId: number;
+}) {
+  const mapDivRef = useRef<HTMLDivElement | null>(null);
+  const mapRef = useRef<any>(null);
+  const markersLayerRef = useRef<any>(null);
+
+  const [leafletReady, setLeafletReady] = useState(false);
+  const [leafletError, setLeafletError] = useState<string | null>(null);
+
+  // Load Leaflet CSS/JS from CDN (once)
+  useEffect(() => {
+    let cancelled = false;
+
+    const cssId = "leaflet-css";
+    const jsId = "leaflet-js";
+
+    function ensureCss() {
+      if (document.getElementById(cssId)) return;
+      const link = document.createElement("link");
+      link.id = cssId;
+      link.rel = "stylesheet";
+      link.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
+      link.integrity = "sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=";
+      link.crossOrigin = "";
+      document.head.appendChild(link);
+    }
+
+    function ensureJs() {
+      return new Promise<void>((resolve, reject) => {
+        if ((window as any).L) return resolve();
+        const existing = document.getElementById(jsId) as HTMLScriptElement | null;
+        if (existing) {
+          existing.addEventListener("load", () => resolve());
+          existing.addEventListener("error", () => reject(new Error("Leaflet failed to load")));
+          return;
+        }
+        const script = document.createElement("script");
+        script.id = jsId;
+        script.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
+        script.integrity = "sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=";
+        script.crossOrigin = "";
+        script.async = true;
+        script.onload = () => resolve();
+        script.onerror = () => reject(new Error("Leaflet failed to load"));
+        document.body.appendChild(script);
+      });
+    }
+
+    (async () => {
+      try {
+        ensureCss();
+        await ensureJs();
+        if (!cancelled) setLeafletReady(true);
+      } catch (e: any) {
+        if (!cancelled) setLeafletError(e?.message ?? "Leaflet load error");
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Initialize map once Leaflet is ready
+  useEffect(() => {
+    if (!leafletReady) return;
+    if (!mapDivRef.current) return;
+    if (mapRef.current) return;
+
+    const L = (window as any).L;
+    if (!L) {
+      setLeafletError("Leaflet not available.");
+      return;
+    }
+
+    const initialCenter: [number, number] = center ? [center.lat, center.lon] : [39.8283, -98.5795]; // US fallback
+    const initialZoom = center ? 12 : 4;
+
+    const map = L.map(mapDivRef.current, {
+      zoomControl: true,
+      attributionControl: true,
+    }).setView(initialCenter, initialZoom);
+
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: "&copy; OpenStreetMap contributors",
+      maxZoom: 19,
+    }).addTo(map);
+
+    const markersLayer = L.layerGroup().addTo(map);
+
+    mapRef.current = map;
+    markersLayerRef.current = markersLayer;
+
+    // Cleanup
+    return () => {
+      try {
+        map.remove();
+      } catch {}
+      mapRef.current = null;
+      markersLayerRef.current = null;
+    };
+  }, [leafletReady, center]);
+
+  // Update view when center changes
+  useEffect(() => {
+    if (!leafletReady) return;
+    const map = mapRef.current;
+    if (!map) return;
+    if (!center) return;
+
+    map.setView([center.lat, center.lon], 12, { animate: true });
+  }, [leafletReady, center]);
+
+  // Render markers when pins change
+  useEffect(() => {
+    if (!leafletReady) return;
+
+    const L = (window as any).L;
+    const map = mapRef.current;
+    const layer = markersLayerRef.current;
+    if (!L || !map || !layer) return;
+
+    layer.clearLayers();
+
+    // If we have pins, zoom to them (nice demo effect)
+    const bounds: Array<[number, number]> = [];
+
+    for (const p of pins) {
+      const cat = classifyIncident(p.incident);
+      const meta = categoryMeta(cat);
+
+      // A simple colored dot marker (divIcon) — consistent with legend
+      const icon = L.divIcon({
+        className: "",
+        html: `
+          <div style="
+            width: 14px; height: 14px;
+            border-radius: 9999px;
+            background: ${meta.hex};
+            border: 2px solid rgba(15, 23, 42, 0.85);
+            box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.12);
+          "></div>
+        `,
+        iconSize: [14, 14],
+        iconAnchor: [7, 7],
+      });
+
+      const marker = L.marker([p.point.lat, p.point.lon], { icon });
+
+      const safeLabel = p.label.replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+      const safeLoc = p.locationText.replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+      const typeCode = getIncidentTypeCode(p.incident);
+      const typeLine = typeCode != null ? `Type code: <span style="font-family: monospace;">${typeCode}</span>` : "Type code: —";
+
+      marker.bindPopup(`
+        <div style="font-size:12px; line-height: 1.2;">
+          <div style="font-weight:700; margin-bottom:4px;">${safeLabel}</div>
+          <div style="opacity:0.85; margin-bottom:6px;">${safeLoc}</div>
+          <div style="opacity:0.85; margin-bottom:8px;">${typeLine}</div>
+          <div style="opacity:0.85;">Click marker to open incident →</div>
+        </div>
+      `);
+
+      marker.on("click", () => {
+        // Keep department context on drilldown
+        window.location.href = `/incidents/${p.incidentId}?departmentId=${departmentId}`;
+      });
+
+      marker.addTo(layer);
+      bounds.push([p.point.lat, p.point.lon]);
+    }
+
+    if (bounds.length >= 2) {
+      try {
+        map.fitBounds(bounds, { padding: [20, 20] });
+      } catch {}
+    } else if (bounds.length === 1) {
+      map.setView(bounds[0], 14, { animate: true });
+    }
+  }, [leafletReady, pins, departmentId]);
+
+  if (leafletError) {
+    return (
+      <div className="p-4 text-xs text-red-200">
+        Map failed to load: {leafletError}
+      </div>
+    );
+  }
+
+  if (!leafletReady) {
+    return <div className="p-4 text-xs text-slate-300">Loading interactive map…</div>;
+  }
+
+  return (
+    <div
+      ref={mapDivRef}
+      className="h-80 w-full"
+      aria-label="Interactive hotspot map"
+    />
+  );
 }
 
 export default function DepartmentDetailPage() {
@@ -336,16 +560,15 @@ export default function DepartmentDetailPage() {
     };
   }, [apiBase, deptId, idStr, isValidId]);
 
-  // Build hotspot map once dept + incidents are loaded
+  // Geocode center + pins
   useEffect(() => {
     if (!dept) return;
 
     const deptQuery = buildDeptQuery(dept);
 
-    // We geocode a small, recent subset to stay demo-fast and reduce rate-limit risk.
     const incidentCandidates = incidents
       .filter((i) => Boolean(i.address || i.city || i.state))
-      .slice(0, 15);
+      .slice(0, 20); // slightly higher now that we have a real map
 
     let cancelled = false;
 
@@ -354,13 +577,11 @@ export default function DepartmentDetailPage() {
       setMapNote("Geocoding map points…");
 
       try {
-        // 1) Center the map on the department city/state (best effort)
         if (deptQuery) {
           const center = await geocodeToPoint(deptQuery);
           if (!cancelled) setDeptCenter(center);
         }
 
-        // 2) Geocode incident pins sequentially (polite to Nominatim)
         const builtPins: IncidentPin[] = [];
         for (const i of incidentCandidates) {
           if (cancelled) break;
@@ -380,7 +601,7 @@ export default function DepartmentDetailPage() {
             });
           }
 
-          // Small delay helps avoid demo-day rate limits.
+          // small delay helps with demo-day rate limits
           await sleep(350);
         }
 
@@ -494,13 +715,13 @@ export default function DepartmentDetailPage() {
             </div>
           </div>
 
-          {/* ✅ Hotspot Map + A) Color legend + colored incident rows */}
+          {/* Hotspot Map (Leaflet) */}
           <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <div className="text-sm font-semibold text-slate-100">NERIS Hotspot Intelligence Map</div>
                 <div className="mt-1 text-[11px] text-slate-400">
-                  Demo view: pin recent incidents by address. Next: cluster into hotspot circles by density.
+                  Interactive map with category-colored pins (NERIS). Click a pin to open the incident.
                 </div>
               </div>
 
@@ -516,7 +737,7 @@ export default function DepartmentDetailPage() {
               ) : null}
             </div>
 
-            {/* A) Legend */}
+            {/* Legend */}
             <div className="mt-3 rounded-md border border-slate-800 bg-slate-950/20 p-3">
               <div className="text-[10px] uppercase tracking-wide text-slate-400">Category legend (NERIS)</div>
               <div className="mt-2 flex flex-wrap gap-2">
@@ -543,33 +764,22 @@ export default function DepartmentDetailPage() {
               </div>
             </div>
 
-            {/* Map */}
             <div className="mt-3 overflow-hidden rounded-md border border-slate-800 bg-slate-950/30">
-              {deptCenter ? (
-                <iframe
-                  title="Department map (OpenStreetMap)"
-                  className="h-80 w-full"
-                  loading="lazy"
-                  src={osmEmbedUrl(deptCenter.lat, deptCenter.lon)}
-                />
-              ) : (
-                <div className="p-4 text-xs text-slate-300">
-                  {mapLoading ? "Loading map preview…" : "Map preview unavailable (missing city/state)."}
-                </div>
-              )}
+              <HotspotLeafletMap center={deptCenter} pins={pins} departmentId={dept.id} />
             </div>
 
             <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
               <div className="text-[11px] text-slate-400">{mapNote ?? (mapLoading ? "Geocoding…" : "—")}</div>
-              <div className="text-[11px] text-slate-500">Map overlays (colored pins) come in step B (Leaflet).</div>
+              <div className="text-[11px] text-slate-500">
+                Next: hotspot circles (cluster-by-distance + count labels).
+              </div>
             </div>
 
-            {/* Pins list (click to incident) — now color-coded */}
+            {/* Fallback list stays (good for demo + accessibility) */}
             <div className="mt-3 grid gap-2 sm:grid-cols-2">
               {pins.length === 0 ? (
                 <div className="text-xs text-slate-300">
-                  No pinned incidents yet (missing addresses or geocode limits). The list below still shows category
-                  coloring when the incident type code is available.
+                  No pinned incidents yet (missing addresses or geocode limits). Your incident list below still works.
                 </div>
               ) : (
                 pins.map((p) => (
@@ -595,14 +805,9 @@ export default function DepartmentDetailPage() {
                 ))
               )}
             </div>
-
-            <div className="mt-3 text-[11px] text-slate-500">
-              Future: convert pins into <span className="text-slate-300">hotspot circles</span> (clustered by distance),
-              sized by incident count, filterable by time window and NERIS type.
-            </div>
           </div>
 
-          {/* Recent incidents list — now color-coded */}
+          {/* Recent incidents list */}
           <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
             <div className="flex items-center justify-between">
               <div className="text-sm font-semibold text-slate-100">Recent incidents</div>
@@ -640,10 +845,9 @@ export default function DepartmentDetailPage() {
           </div>
 
           <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-4">
-            <div className="text-[10px] uppercase tracking-wide text-slate-400">Tomorrow’s “wow” upgrade for this page</div>
+            <div className="text-[10px] uppercase tracking-wide text-slate-400">Next “wow” upgrade</div>
             <div className="mt-1 text-[11px] text-slate-300">
-              Step B: replace the static embed with a Leaflet map so pins render on-map, color-coded by NERIS category,
-              clickable, and ready for clustering.
+              Hotspot circles + clustering: group nearby incidents, size circles by count, and add time/type filters.
             </div>
           </div>
         </>
