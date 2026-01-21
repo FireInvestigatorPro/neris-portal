@@ -23,7 +23,6 @@ type ApiIncident = {
   state: string | null;
   neris_incident_id: string | null;
 
-  // Optional: backend may provide incident type code; used for coloring
   incident_type_code?: number | string | null;
   incident_type?: number | string | null;
   neris_incident_type_code?: number | string | null;
@@ -89,8 +88,8 @@ function joinLocation(i: ApiIncident) {
 }
 
 function byMostRecent(a: ApiIncident, b: ApiIncident) {
-  const da = new Date(a.occurred_at ?? a.created_at ?? 0).getTime();
-  const db = new Date(b.occurred_at ?? b.created_at ?? 0).getTime();
+  const da = new Date(getIncidentTimestampIso(a) ?? 0).getTime();
+  const db = new Date(getIncidentTimestampIso(b) ?? 0).getTime();
   return db - da;
 }
 
@@ -243,6 +242,19 @@ function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+function getIncidentTimestampIso(i: ApiIncident): string | null {
+  return i.occurred_at ?? i.created_at ?? null;
+}
+
+function isWithinLastNDays(i: ApiIncident, days: number, nowMs: number): boolean {
+  const iso = getIncidentTimestampIso(i);
+  if (!iso) return false;
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return false;
+  const cutoff = nowMs - days * 24 * 60 * 60 * 1000;
+  return t >= cutoff;
+}
+
 /**
  * Leaflet (CDN) Hotspot Map
  * - No npm installs
@@ -331,7 +343,7 @@ function HotspotLeafletMap({
       return;
     }
 
-    const initialCenter: [number, number] = center ? [center.lat, center.lon] : [39.8283, -98.5795]; // US fallback
+    const initialCenter: [number, number] = center ? [center.lat, center.lon] : [39.8283, -98.5795];
     const initialZoom = center ? 12 : 4;
 
     const map = L.map(mapDivRef.current, {
@@ -349,7 +361,6 @@ function HotspotLeafletMap({
     mapRef.current = map;
     markersLayerRef.current = markersLayer;
 
-    // Cleanup
     return () => {
       try {
         map.remove();
@@ -380,14 +391,12 @@ function HotspotLeafletMap({
 
     layer.clearLayers();
 
-    // If we have pins, zoom to them (nice demo effect)
     const bounds: Array<[number, number]> = [];
 
     for (const p of pins) {
       const cat = classifyIncident(p.incident);
       const meta = categoryMeta(cat);
 
-      // A simple colored dot marker (divIcon) — consistent with legend
       const icon = L.divIcon({
         className: "",
         html: `
@@ -408,7 +417,8 @@ function HotspotLeafletMap({
       const safeLabel = p.label.replaceAll("<", "&lt;").replaceAll(">", "&gt;");
       const safeLoc = p.locationText.replaceAll("<", "&lt;").replaceAll(">", "&gt;");
       const typeCode = getIncidentTypeCode(p.incident);
-      const typeLine = typeCode != null ? `Type code: <span style="font-family: monospace;">${typeCode}</span>` : "Type code: —";
+      const typeLine =
+        typeCode != null ? `Type code: <span style="font-family: monospace;">${typeCode}</span>` : "Type code: —";
 
       marker.bindPopup(`
         <div style="font-size:12px; line-height: 1.2;">
@@ -420,7 +430,6 @@ function HotspotLeafletMap({
       `);
 
       marker.on("click", () => {
-        // Keep department context on drilldown
         window.location.href = `/incidents/${p.incidentId}?departmentId=${departmentId}`;
       });
 
@@ -438,23 +447,74 @@ function HotspotLeafletMap({
   }, [leafletReady, pins, departmentId]);
 
   if (leafletError) {
-    return (
-      <div className="p-4 text-xs text-red-200">
-        Map failed to load: {leafletError}
-      </div>
-    );
+    return <div className="p-4 text-xs text-red-200">Map failed to load: {leafletError}</div>;
   }
 
   if (!leafletReady) {
     return <div className="p-4 text-xs text-slate-300">Loading interactive map…</div>;
   }
 
+  return <div ref={mapDivRef} className="h-80 w-full" aria-label="Interactive hotspot map" />;
+}
+
+// ----------------------
+// Time filter UI
+// ----------------------
+
+type TimeRangeKey = "all" | "30" | "90" | "365";
+
+function timeRangeLabel(key: TimeRangeKey) {
+  switch (key) {
+    case "30":
+      return "Last 30 days";
+    case "90":
+      return "Last 90 days";
+    case "365":
+      return "Last 365 days";
+    default:
+      return "All time";
+  }
+}
+
+function timeRangeDays(key: TimeRangeKey): number | null {
+  if (key === "30") return 30;
+  if (key === "90") return 90;
+  if (key === "365") return 365;
+  return null;
+}
+
+function TimeFilterChips({
+  value,
+  onChange,
+}: {
+  value: TimeRangeKey;
+  onChange: (v: TimeRangeKey) => void;
+}) {
+  const options: TimeRangeKey[] = ["all", "30", "90", "365"];
+
   return (
-    <div
-      ref={mapDivRef}
-      className="h-80 w-full"
-      aria-label="Interactive hotspot map"
-    />
+    <div className="flex flex-wrap gap-2">
+      {options.map((k) => {
+        const active = value === k;
+        return (
+          <button
+            key={k}
+            type="button"
+            className={cn(
+              "rounded-full border px-3 py-1 text-[11px] font-semibold",
+              active
+                ? "border-orange-400/60 bg-orange-500/10 text-orange-200"
+                : "border-slate-800 bg-slate-950/30 text-slate-300 hover:border-orange-400/40 hover:text-orange-200"
+            )}
+            onClick={() => onChange(k)}
+            aria-pressed={active}
+            title={timeRangeLabel(k)}
+          >
+            {k === "all" ? "All" : `${k}d`}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
@@ -470,6 +530,9 @@ export default function DepartmentDetailPage() {
   const [loading, setLoading] = useState(true);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Time filter state (Step 1)
+  const [timeRange, setTimeRange] = useState<TimeRangeKey>("90");
 
   // Hotspot state
   const [deptCenter, setDeptCenter] = useState<GeoPoint | null>(null);
@@ -560,15 +623,23 @@ export default function DepartmentDetailPage() {
     };
   }, [apiBase, deptId, idStr, isValidId]);
 
-  // Geocode center + pins
+  // Filter incidents by time range (Step 1)
+  const filteredIncidents = useMemo(() => {
+    const days = timeRangeDays(timeRange);
+    if (!days) return incidents;
+    const nowMs = Date.now();
+    return incidents.filter((i) => isWithinLastNDays(i, days, nowMs));
+  }, [incidents, timeRange]);
+
+  // Geocode center + pins based on filtered incidents
   useEffect(() => {
     if (!dept) return;
 
     const deptQuery = buildDeptQuery(dept);
 
-    const incidentCandidates = incidents
+    const incidentCandidates = filteredIncidents
       .filter((i) => Boolean(i.address || i.city || i.state))
-      .slice(0, 20); // slightly higher now that we have a real map
+      .slice(0, 20);
 
     let cancelled = false;
 
@@ -595,13 +666,12 @@ export default function DepartmentDetailPage() {
               incidentId: i.id,
               label: i.neris_incident_id ? String(i.neris_incident_id) : `Incident #${i.id}`,
               locationText: q,
-              occurredAt: i.occurred_at ?? i.created_at ?? null,
+              occurredAt: getIncidentTimestampIso(i),
               point: pt,
               incident: i,
             });
           }
 
-          // small delay helps with demo-day rate limits
           await sleep(350);
         }
 
@@ -609,8 +679,8 @@ export default function DepartmentDetailPage() {
           setPins(builtPins);
           setMapNote(
             builtPins.length > 0
-              ? `Showing ${builtPins.length} pinned incident(s) (demo limit).`
-              : "No mappable incident addresses found (or geocode limits)."
+              ? `Showing ${builtPins.length} pinned incident(s) (demo limit) • ${timeRangeLabel(timeRange)}`
+              : `No mappable incident addresses found (or geocode limits) • ${timeRangeLabel(timeRange)}`
           );
         }
       } catch {
@@ -623,10 +693,11 @@ export default function DepartmentDetailPage() {
     return () => {
       cancelled = true;
     };
-  }, [dept, incidents]);
+  }, [dept, filteredIncidents, timeRange]);
 
   const totalIncidents = incidents.length;
-  const mostRecent = incidents[0] ?? null;
+  const showingIncidents = filteredIncidents.length;
+  const mostRecent = filteredIncidents[0] ?? incidents[0] ?? null;
 
   const deptQueryForLink = dept ? buildDeptQuery(dept) : "";
   const deptMapLink = deptQueryForLink ? osmSearchUrl(deptQueryForLink) : null;
@@ -686,13 +757,15 @@ export default function DepartmentDetailPage() {
                 <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
                   <div className="text-[10px] uppercase tracking-wide text-slate-400">Total incidents</div>
                   <div className="text-xl font-semibold text-slate-100">{totalIncidents}</div>
-                  <div className="text-[11px] text-slate-400">Demo DB count</div>
+                  <div className="text-[11px] text-slate-400">
+                    Showing <span className="text-slate-200">{showingIncidents}</span> • {timeRangeLabel(timeRange)}
+                  </div>
                 </div>
 
                 <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
-                  <div className="text-[10px] uppercase tracking-wide text-slate-400">Most recent incident</div>
+                  <div className="text-[10px] uppercase tracking-wide text-slate-400">Most recent (filtered)</div>
                   {mostRecent ? (
-                    <DateBlock iso={mostRecent.occurred_at ?? mostRecent.created_at ?? null} />
+                    <DateBlock iso={getIncidentTimestampIso(mostRecent)} />
                   ) : (
                     <div className="text-slate-300">—</div>
                   )}
@@ -715,7 +788,7 @@ export default function DepartmentDetailPage() {
             </div>
           </div>
 
-          {/* Hotspot Map (Leaflet) */}
+          {/* Hotspot Map (Leaflet) + Time Filters */}
           <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
             <div className="flex items-start justify-between gap-3">
               <div>
@@ -735,6 +808,18 @@ export default function DepartmentDetailPage() {
                   Open map →
                 </a>
               ) : null}
+            </div>
+
+            {/* Time filter chips (Step 1) */}
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-md border border-slate-800 bg-slate-950/20 p-3">
+              <div>
+                <div className="text-[10px] uppercase tracking-wide text-slate-400">Time window</div>
+                <div className="mt-1 text-[11px] text-slate-300">
+                  Showing <span className="text-slate-100">{showingIncidents}</span> of{" "}
+                  <span className="text-slate-100">{totalIncidents}</span> incidents
+                </div>
+              </div>
+              <TimeFilterChips value={timeRange} onChange={setTimeRange} />
             </div>
 
             {/* Legend */}
@@ -770,16 +855,14 @@ export default function DepartmentDetailPage() {
 
             <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
               <div className="text-[11px] text-slate-400">{mapNote ?? (mapLoading ? "Geocoding…" : "—")}</div>
-              <div className="text-[11px] text-slate-500">
-                Next: hotspot circles (cluster-by-distance + count labels).
-              </div>
+              <div className="text-[11px] text-slate-500">Next: hotspot circles (cluster-by-distance + count labels).</div>
             </div>
 
-            {/* Fallback list stays (good for demo + accessibility) */}
+            {/* Pin list (filtered) */}
             <div className="mt-3 grid gap-2 sm:grid-cols-2">
               {pins.length === 0 ? (
                 <div className="text-xs text-slate-300">
-                  No pinned incidents yet (missing addresses or geocode limits). Your incident list below still works.
+                  No pinned incidents in this time window (missing addresses or geocode limits).
                 </div>
               ) : (
                 pins.map((p) => (
@@ -807,18 +890,20 @@ export default function DepartmentDetailPage() {
             </div>
           </div>
 
-          {/* Recent incidents list */}
+          {/* Recent incidents list (filtered) */}
           <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
             <div className="flex items-center justify-between">
               <div className="text-sm font-semibold text-slate-100">Recent incidents</div>
-              <div className="text-[11px] text-slate-400">Top 10</div>
+              <div className="text-[11px] text-slate-400">Top 10 (filtered)</div>
             </div>
 
-            {incidents.length === 0 ? (
-              <div className="mt-3 text-xs text-slate-300">No incidents yet for this department.</div>
+            {filteredIncidents.length === 0 ? (
+              <div className="mt-3 text-xs text-slate-300">
+                No incidents in this time window. Try a larger range (e.g., 365d or All).
+              </div>
             ) : (
               <div className="mt-3 space-y-2">
-                {incidents.slice(0, 10).map((i) => (
+                {filteredIncidents.slice(0, 10).map((i) => (
                   <Link
                     key={i.id}
                     href={`/incidents/${i.id}?departmentId=${dept.id}`}
@@ -835,7 +920,7 @@ export default function DepartmentDetailPage() {
                         <div className="mt-1 truncate text-[11px] text-slate-400">{joinLocation(i)}</div>
                       </div>
                       <div className="text-right text-[11px]">
-                        <DateBlock iso={i.occurred_at} />
+                        <DateBlock iso={getIncidentTimestampIso(i)} />
                       </div>
                     </div>
                   </Link>
@@ -847,7 +932,7 @@ export default function DepartmentDetailPage() {
           <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-4">
             <div className="text-[10px] uppercase tracking-wide text-slate-400">Next “wow” upgrade</div>
             <div className="mt-1 text-[11px] text-slate-300">
-              Hotspot circles + clustering: group nearby incidents, size circles by count, and add time/type filters.
+              Step 2: Hotspot circles toggle — cluster nearby incidents, size circles by count, and label clusters.
             </div>
           </div>
         </>
