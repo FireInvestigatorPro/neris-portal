@@ -55,6 +55,8 @@ type HotspotCluster = {
 type TimeRangeKey = "all" | "30" | "90" | "365";
 type MapMode = "pins" | "hotspots";
 
+type TypeFilterKey = "all" | IncidentCategoryKey;
+
 function getApiBase() {
   const fallback = "https://infernointelai-backend.onrender.com";
   return process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") ?? fallback;
@@ -266,6 +268,55 @@ function TimeFilterChips({
   );
 }
 
+// ----------------------
+// Type filter UI (Step 3)
+// ----------------------
+
+function typeFilterLabel(key: TypeFilterKey) {
+  if (key === "all") return "All categories";
+  return categoryMeta(key).label;
+}
+
+function TypeFilterChips({
+  value,
+  onChange,
+}: {
+  value: TypeFilterKey;
+  onChange: (v: TypeFilterKey) => void;
+}) {
+  const options: TypeFilterKey[] = ["all", "structure", "vehicle", "outside", "other", "unknown"];
+
+  return (
+    <div className="flex flex-wrap gap-2">
+      {options.map((k) => {
+        const active = value === k;
+
+        const pill =
+          k === "all"
+            ? active
+              ? "border-orange-400/60 bg-orange-500/10 text-orange-200"
+              : "border-slate-800 bg-slate-950/30 text-slate-300 hover:border-orange-400/40 hover:text-orange-200"
+            : active
+              ? cn(categoryMeta(k).pill, "border-orange-400/30")
+              : "border-slate-800 bg-slate-950/30 text-slate-300 hover:border-orange-400/40 hover:text-orange-200";
+
+        return (
+          <button
+            key={k}
+            type="button"
+            className={cn("rounded-full border px-3 py-1 text-[11px] font-semibold", pill)}
+            onClick={() => onChange(k)}
+            aria-pressed={active}
+            title={typeFilterLabel(k)}
+          >
+            {k === "all" ? "All" : categoryMeta(k).label.split(" ")[0]}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function MapModeToggle({ value, onChange }: { value: MapMode; onChange: (v: MapMode) => void }) {
   return (
     <div className="inline-flex overflow-hidden rounded-full border border-slate-800 bg-slate-950/30">
@@ -452,7 +503,6 @@ function HotspotLeafletMap({
   const [leafletReady, setLeafletReady] = useState(false);
   const [leafletError, setLeafletError] = useState<string | null>(null);
 
-  // Load Leaflet CSS/JS from CDN (once)
   useEffect(() => {
     let cancelled = false;
 
@@ -506,7 +556,6 @@ function HotspotLeafletMap({
     };
   }, []);
 
-  // Initialize map once Leaflet is ready
   useEffect(() => {
     if (!leafletReady) return;
     if (!mapDivRef.current) return;
@@ -545,7 +594,6 @@ function HotspotLeafletMap({
     };
   }, [leafletReady, center]);
 
-  // Update center
   useEffect(() => {
     if (!leafletReady) return;
     const map = mapRef.current;
@@ -555,7 +603,6 @@ function HotspotLeafletMap({
     map.setView([center.lat, center.lon], 12, { animate: true });
   }, [leafletReady, center]);
 
-  // Render pins or hotspots
   useEffect(() => {
     if (!leafletReady) return;
 
@@ -598,7 +645,6 @@ function HotspotLeafletMap({
     } else {
       for (const c of clusters) {
         const meta = categoryMeta(c.dominantCategory);
-
         const radiusMeters = Math.min(700, 120 + c.count * 70);
 
         const circle = L.circle([c.center.lat, c.center.lon], {
@@ -689,6 +735,9 @@ export default function DepartmentDetailPage() {
   const [timeRange, setTimeRange] = useState<TimeRangeKey>("90");
   const [mapMode, setMapMode] = useState<MapMode>("pins");
 
+  // Step 3: type filter
+  const [typeFilter, setTypeFilter] = useState<TypeFilterKey>("all");
+
   const [deptCenter, setDeptCenter] = useState<GeoPoint | null>(null);
   const [pins, setPins] = useState<IncidentPin[]>([]);
   const [mapLoading, setMapLoading] = useState(false);
@@ -751,7 +800,6 @@ export default function DepartmentDetailPage() {
         const items = Array.isArray((incJson as any)?.items) ? (incJson as any).items : incJson;
 
         const list: ApiIncident[] = Array.isArray(items) ? items : [];
-
         if (!cancelled) setIncidents(list.slice().sort(byMostRecent));
       } catch (e: any) {
         if (!cancelled) setError(e?.message ?? "Failed to load department.");
@@ -769,12 +817,19 @@ export default function DepartmentDetailPage() {
     };
   }, [apiBase, deptId, idStr, isValidId]);
 
-  const filteredIncidents = useMemo(() => {
+  // Filter incidents by time range first
+  const timeFilteredIncidents = useMemo(() => {
     const days = timeRangeDays(timeRange);
     if (!days) return incidents;
     const nowMs = Date.now();
     return incidents.filter((i) => isWithinLastNDays(i, days, nowMs));
   }, [incidents, timeRange]);
+
+  // Then apply type filter
+  const filteredIncidents = useMemo(() => {
+    if (typeFilter === "all") return timeFilteredIncidents;
+    return timeFilteredIncidents.filter((i) => classifyIncident(i) === typeFilter);
+  }, [timeFilteredIncidents, typeFilter]);
 
   useEffect(() => {
     if (!dept) return;
@@ -820,10 +875,13 @@ export default function DepartmentDetailPage() {
 
         if (!cancelled) {
           setPins(builtPins);
+          const filterText =
+            typeFilter === "all" ? "All categories" : categoryMeta(typeFilter).label;
+
           setMapNote(
             builtPins.length > 0
-              ? `Showing ${builtPins.length} mappable incident(s) • ${timeRangeLabel(timeRange)}`
-              : `No mappable incident addresses found (or geocode limits) • ${timeRangeLabel(timeRange)}`
+              ? `Showing ${builtPins.length} mappable incident(s) • ${timeRangeLabel(timeRange)} • ${filterText}`
+              : `No mappable incident addresses found (or geocode limits) • ${timeRangeLabel(timeRange)} • ${filterText}`
           );
         }
       } catch {
@@ -836,16 +894,19 @@ export default function DepartmentDetailPage() {
     return () => {
       cancelled = true;
     };
-  }, [dept, filteredIncidents, timeRange]);
+  }, [dept, filteredIncidents, timeRange, typeFilter]);
 
   const clusters = useMemo(() => computeClusters(pins, 250), [pins]);
 
   const totalIncidents = incidents.length;
   const showingIncidents = filteredIncidents.length;
-  const mostRecent = filteredIncidents[0] ?? incidents[0] ?? null;
+  const mostRecent = filteredIncidents[0] ?? timeFilteredIncidents[0] ?? incidents[0] ?? null;
 
   const deptQueryForLink = dept ? buildDeptQuery(dept) : "";
   const deptMapLink = deptQueryForLink ? osmSearchUrl(deptQueryForLink) : null;
+
+  const activeFiltersText =
+    `${timeRangeLabel(timeRange)} • ` + (typeFilter === "all" ? "All categories" : categoryMeta(typeFilter).label);
 
   return (
     <section className="space-y-4">
@@ -902,7 +963,7 @@ export default function DepartmentDetailPage() {
                   <div className="text-[10px] uppercase tracking-wide text-slate-400">Total incidents</div>
                   <div className="text-xl font-semibold text-slate-100">{totalIncidents}</div>
                   <div className="text-[11px] text-slate-400">
-                    Showing <span className="text-slate-200">{showingIncidents}</span> • {timeRangeLabel(timeRange)}
+                    Showing <span className="text-slate-200">{showingIncidents}</span> • {activeFiltersText}
                   </div>
                 </div>
 
@@ -933,7 +994,7 @@ export default function DepartmentDetailPage() {
               <div>
                 <div className="text-sm font-semibold text-slate-100">NERIS Hotspot Intelligence Map</div>
                 <div className="mt-1 text-[11px] text-slate-400">
-                  Toggle between pins and hotspots. Hotspots show density clusters (not severity/cause).
+                  Toggle between pins and hotspots. Filters update map + lists instantly.
                 </div>
               </div>
 
@@ -952,17 +1013,29 @@ export default function DepartmentDetailPage() {
               </div>
             </div>
 
-            <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-md border border-slate-800 bg-slate-950/20 p-3">
-              <div>
-                <div className="text-[10px] uppercase tracking-wide text-slate-400">Time window</div>
-                <div className="mt-1 text-[11px] text-slate-300">
-                  Showing <span className="text-slate-100">{showingIncidents}</span> of{" "}
-                  <span className="text-slate-100">{totalIncidents}</span> incidents
+            {/* Filters row */}
+            <div className="mt-3 rounded-md border border-slate-800 bg-slate-950/20 p-3 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="text-[10px] uppercase tracking-wide text-slate-400">Time window</div>
+                  <div className="mt-1 text-[11px] text-slate-300">
+                    Showing <span className="text-slate-100">{showingIncidents}</span> of{" "}
+                    <span className="text-slate-100">{totalIncidents}</span> incidents
+                  </div>
                 </div>
+                <TimeFilterChips value={timeRange} onChange={setTimeRange} />
               </div>
-              <TimeFilterChips value={timeRange} onChange={setTimeRange} />
+
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="text-[10px] uppercase tracking-wide text-slate-400">Category filter</div>
+                  <div className="mt-1 text-[11px] text-slate-300">Active: {activeFiltersText}</div>
+                </div>
+                <TypeFilterChips value={typeFilter} onChange={setTypeFilter} />
+              </div>
             </div>
 
+            {/* Legend */}
             <div className="mt-3 rounded-md border border-slate-800 bg-slate-950/20 p-3">
               <div className="text-[10px] uppercase tracking-wide text-slate-400">Category legend (NERIS)</div>
               <div className="mt-2 flex flex-wrap gap-2">
@@ -1008,9 +1081,10 @@ export default function DepartmentDetailPage() {
               </div>
             </div>
 
+            {/* Pin list */}
             <div className="mt-3 grid gap-2 sm:grid-cols-2">
               {pins.length === 0 ? (
-                <div className="text-xs text-slate-300">No pinned incidents in this time window.</div>
+                <div className="text-xs text-slate-300">No pinned incidents match the active filters.</div>
               ) : (
                 pins.map((p) => (
                   <Link
@@ -1037,6 +1111,7 @@ export default function DepartmentDetailPage() {
             </div>
           </div>
 
+          {/* Recent incidents list (filtered) */}
           <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
             <div className="flex items-center justify-between">
               <div className="text-sm font-semibold text-slate-100">Recent incidents</div>
@@ -1045,7 +1120,7 @@ export default function DepartmentDetailPage() {
 
             {filteredIncidents.length === 0 ? (
               <div className="mt-3 text-xs text-slate-300">
-                No incidents in this time window. Try a larger range (e.g., 365d or All).
+                No incidents match the active filters. Try “All” categories or expand the time window.
               </div>
             ) : (
               <div className="mt-3 space-y-2">
@@ -1073,13 +1148,6 @@ export default function DepartmentDetailPage() {
                 ))}
               </div>
             )}
-          </div>
-
-          <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-4">
-            <div className="text-[10px] uppercase tracking-wide text-slate-400">Next “wow” upgrade</div>
-            <div className="mt-1 text-[11px] text-slate-300">
-              Step 3: Type filter — show only Structure / Vehicle / Outside / Other incidents (pins + hotspots).
-            </div>
           </div>
         </>
       )}
