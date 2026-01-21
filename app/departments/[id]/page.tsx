@@ -88,6 +88,65 @@ function byMostRecent(a: ApiIncident, b: ApiIncident) {
   return db - da;
 }
 
+// ----------------------
+// Hotspot Map helpers
+// ----------------------
+
+type GeoPoint = { lat: number; lon: number };
+type IncidentPin = {
+  incidentId: number;
+  label: string;
+  locationText: string;
+  occurredAt?: string | null;
+  point: GeoPoint;
+};
+
+function buildQueryFromIncident(i: ApiIncident) {
+  const parts = [i.address, i.city, i.state].filter(Boolean) as string[];
+  return parts.join(", ");
+}
+
+function buildDeptQuery(dept: Department) {
+  const parts = [dept.city, dept.state].filter(Boolean) as string[];
+  return parts.join(", ");
+}
+
+function osmSearchUrl(query: string) {
+  return `https://www.openstreetmap.org/search?query=${encodeURIComponent(query)}`;
+}
+
+function osmEmbedUrl(lat: number, lon: number) {
+  const delta = 0.02; // bigger bbox on dept view
+  const left = lon - delta;
+  const right = lon + delta;
+  const top = lat + delta;
+  const bottom = lat - delta;
+
+  return `https://www.openstreetmap.org/export/embed.html?bbox=${left}%2C${bottom}%2C${right}%2C${top}&layer=mapnik&marker=${lat}%2C${lon}`;
+}
+
+async function geocodeToPoint(query: string): Promise<GeoPoint | null> {
+  const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=${encodeURIComponent(
+    query
+  )}`;
+
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) return null;
+
+  const data = (await res.json()) as Array<{ lat: string; lon: string }>;
+  if (!Array.isArray(data) || data.length === 0) return null;
+
+  const lat = Number(data[0].lat);
+  const lon = Number(data[0].lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+
+  return { lat, lon };
+}
+
+function cn(...classes: Array<string | false | null | undefined>) {
+  return classes.filter(Boolean).join(" ");
+}
+
 export default function DepartmentDetailPage() {
   const params = useParams<{ id: string }>();
   const idStr = params?.id;
@@ -101,6 +160,12 @@ export default function DepartmentDetailPage() {
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Hotspot state
+  const [deptCenter, setDeptCenter] = useState<GeoPoint | null>(null);
+  const [pins, setPins] = useState<IncidentPin[]>([]);
+  const [mapLoading, setMapLoading] = useState(false);
+  const [mapNote, setMapNote] = useState<string | null>(null);
+
   const isValidId = useMemo(() => Number.isFinite(deptId) && deptId > 0, [deptId]);
 
   useEffect(() => {
@@ -112,6 +177,11 @@ export default function DepartmentDetailPage() {
       setStatusMsg("Loading department…");
       setDept(null);
       setIncidents([]);
+
+      // Reset map on dept change
+      setDeptCenter(null);
+      setPins([]);
+      setMapNote(null);
 
       if (!isValidId) {
         setError(`Invalid department id: "${idStr}"`);
@@ -179,8 +249,73 @@ export default function DepartmentDetailPage() {
     };
   }, [apiBase, deptId, idStr, isValidId]);
 
+  // Build hotspot map once dept + incidents are loaded
+  useEffect(() => {
+    if (!dept || incidents.length === 0) return;
+
+    const deptQuery = buildDeptQuery(dept);
+    const incidentCandidates = incidents
+      .filter((i) => Boolean(i.address || i.city || i.state))
+      .slice(0, 15); // keep demo snappy and reduce geocode calls
+
+    let cancelled = false;
+
+    (async () => {
+      setMapLoading(true);
+      setMapNote("Geocoding map points…");
+
+      try {
+        // 1) Center the map on the department city/state (best effort)
+        if (deptQuery) {
+          const center = await geocodeToPoint(deptQuery);
+          if (!cancelled) setDeptCenter(center);
+        }
+
+        // 2) Geocode incident pins sequentially (polite to Nominatim)
+        const builtPins: IncidentPin[] = [];
+        for (const i of incidentCandidates) {
+          if (cancelled) break;
+
+          const q = buildQueryFromIncident(i);
+          if (!q) continue;
+
+          const pt = await geocodeToPoint(q);
+          if (!pt) continue;
+
+          builtPins.push({
+            incidentId: i.id,
+            label: i.neris_incident_id ? String(i.neris_incident_id) : `Incident #${i.id}`,
+            locationText: q,
+            occurredAt: i.occurred_at ?? i.created_at ?? null,
+            point: pt,
+          });
+        }
+
+        if (!cancelled) {
+          setPins(builtPins);
+          setMapNote(
+            builtPins.length > 0
+              ? `Showing ${builtPins.length} pinned incident(s) (demo limit).`
+              : "No mappable incident addresses found."
+          );
+        }
+      } catch {
+        if (!cancelled) setMapNote("Map preview unavailable (geocoding failed).");
+      } finally {
+        if (!cancelled) setMapLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [dept, incidents]);
+
   const totalIncidents = incidents.length;
   const mostRecent = incidents[0] ?? null;
+
+  const deptQueryForLink = dept ? buildDeptQuery(dept) : "";
+  const deptMapLink = deptQueryForLink ? osmSearchUrl(deptQueryForLink) : null;
 
   return (
     <section className="space-y-4">
@@ -227,7 +362,7 @@ export default function DepartmentDetailPage() {
                 {dept.neris_department_id ? (
                   <>
                     · <span className="text-slate-400">NERIS ID:</span>{" "}
-                    <span className="text-slate-100Aligned text-slate-100">{dept.neris_department_id}</span>
+                    <span className="text-slate-100">{dept.neris_department_id}</span>
                   </>
                 ) : null}
               </div>
@@ -271,6 +406,88 @@ export default function DepartmentDetailPage() {
             </div>
           </div>
 
+          {/* ✅ NEW: Hotspot Map */}
+          <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold text-slate-100">
+                  NERIS Hotspot Intelligence Map
+                </div>
+                <div className="mt-1 text-[11px] text-slate-400">
+                  Demo view: pin recent incidents by address. Next step: cluster into hotspot circles by density.
+                </div>
+              </div>
+
+              {deptMapLink ? (
+                <a
+                  className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100 hover:border-orange-400"
+                  href={deptMapLink}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Open map →
+                </a>
+              ) : null}
+            </div>
+
+            <div className="mt-3 overflow-hidden rounded-md border border-slate-800 bg-slate-950/30">
+              {deptCenter ? (
+                <iframe
+                  title="Department map (OpenStreetMap)"
+                  className="h-80 w-full"
+                  loading="lazy"
+                  src={osmEmbedUrl(deptCenter.lat, deptCenter.lon)}
+                />
+              ) : (
+                <div className="p-4 text-xs text-slate-300">
+                  {mapLoading ? "Loading map preview…" : "Map preview unavailable (missing city/state)."}
+                </div>
+              )}
+            </div>
+
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+              <div className="text-[11px] text-slate-400">
+                {mapNote ?? (mapLoading ? "Geocoding…" : "—")}
+              </div>
+              <div className="text-[11px] text-slate-500">
+                Pins are clickable below (map pin overlay is Phase 2).
+              </div>
+            </div>
+
+            {/* Pins list (click to incident) */}
+            <div className="mt-3 grid gap-2 sm:grid-cols-2">
+              {pins.length === 0 ? (
+                <div className="text-xs text-slate-300">
+                  No pinned incidents yet (missing addresses or geocode limits).
+                </div>
+              ) : (
+                pins.map((p) => (
+                  <Link
+                    key={p.incidentId}
+                    href={`/incidents/${p.incidentId}?departmentId=${dept.id}`}
+                    className="block rounded-md border border-slate-800 bg-slate-950/30 p-3 hover:border-orange-400"
+                    title={p.locationText}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="text-xs font-semibold text-slate-100">{p.label}</div>
+                        <div className="mt-1 text-[11px] text-slate-400">{p.locationText}</div>
+                      </div>
+                      <div className="text-right text-[11px]">
+                        <DateBlock iso={p.occurredAt ?? null} />
+                      </div>
+                    </div>
+                  </Link>
+                ))
+              )}
+            </div>
+
+            <div className="mt-3 text-[11px] text-slate-500">
+              Future: convert pins into <span className="text-slate-300">hotspot circles</span> (clustered by distance),
+              sized by incident count, and filtered by incident type/time range.
+            </div>
+          </div>
+
           <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
             <div className="flex items-center justify-between">
               <div className="text-sm font-semibold text-slate-100">Recent incidents</div>
@@ -311,8 +528,7 @@ export default function DepartmentDetailPage() {
               Tomorrow’s “wow” upgrade for this page
             </div>
             <div className="mt-1 text-[11px] text-slate-300">
-              Add a “Department Value Panel”: last-30-days incident count, top addresses, and a simple
-              “hotspot” list (no maps yet) — it makes chiefs instantly see why this matters.
+              Add filters: last 30/90 days, incident type code, and “cluster view” toggles for hotspot circles.
             </div>
           </div>
         </>
