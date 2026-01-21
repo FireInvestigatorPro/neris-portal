@@ -68,6 +68,28 @@ async function resolveMaybePromise<T>(v: Promise<T> | T | undefined): Promise<T 
   return await v;
 }
 
+function cn(...classes: Array<string | false | null | undefined>) {
+  return classes.filter(Boolean).join(" ");
+}
+
+/**
+ * Demo-safe NFPA-aligned field:
+ * - NFPA 921 emphasizes a systematic approach and scientific method.
+ * - Until you have DB support, we surface it as a read-only default.
+ */
+function getInvestigationMethodology() {
+  return "Scientific Method (NFPA 921)";
+}
+
+/**
+ * Demo-only status:
+ * - Keep the UI chip consistent without claiming legal conclusions.
+ * - You can later wire this to a real backend field.
+ */
+function getDemoStatus() {
+  return "Under Investigation";
+}
+
 export default async function IncidentDetailPage({
   params,
   searchParams,
@@ -88,6 +110,9 @@ export default async function IncidentDetailPage({
 
   const rawDeptId = asFirstString(sp.departmentId);
   const departmentId = rawDeptId ? Number(rawDeptId) : NaN;
+
+  // Preserve department context in nav links if present
+  const deptQuery = Number.isFinite(departmentId) ? `?departmentId=${departmentId}` : "";
 
   // 1) Fetch incident directly by ID (preferred)
   let incident: Incident | null = null;
@@ -127,94 +152,235 @@ export default async function IncidentDetailPage({
   // Optional: department label (best effort)
   let department: Department | null = null;
   if (incident?.department_id) {
-    const deptResp = await fetchJson<Department>(`${backend}/api/v1/departments/${incident.department_id}`);
+    const deptResp = await fetchJson<Department>(
+      `${backend}/api/v1/departments/${incident.department_id}`
+    );
     if (deptResp.ok) department = deptResp.data;
   }
 
+  // --------- Not Found / Error UI (polished) ----------
   if (!incident) {
     return (
-      <div className="space-y-4">
-        <div className="text-xs text-slate-400">Incident Case File</div>
-        <h1 className="text-2xl font-semibold">Incident not available</h1>
-        <p className="text-sm text-slate-300">We couldn’t load this incident from the backend.</p>
-
-        <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4 text-xs text-slate-300">
-          <div className="font-semibold text-slate-100">Debug note</div>
-          <div className="mt-1">{fetchNote ?? "Unknown error"}</div>
-
-          <div className="mt-3 text-slate-400">
-            Backend: <span className="text-slate-200">{backend}</span>
+      <div className="mx-auto w-full max-w-5xl space-y-6">
+        {/* Top bar */}
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="space-y-1">
+            <div className="text-xs text-slate-400">Incident Case File</div>
+            <h1 className="text-2xl font-semibold text-slate-100">Incident not available</h1>
           </div>
 
-          <div className="mt-2 text-slate-400">
-            Raw params.id: <span className="text-slate-200">{String(rawIncidentId)}</span>
-          </div>
-
-          <div className="mt-1 text-slate-400">
-            URL should include departmentId when coming from a department list, e.g.{" "}
-            <span className="text-slate-200">?departmentId=7</span>
+          <div className="flex items-center gap-3">
+            <Link
+              href={`/incidents${deptQuery}`}
+              className="rounded-md border border-slate-800 bg-slate-900/40 px-3 py-2 text-sm text-slate-200 hover:bg-slate-900/70"
+            >
+              ← Back to Incidents
+            </Link>
+            <Link
+              href="/dashboard"
+              className="rounded-md border border-slate-800 bg-slate-900/40 px-3 py-2 text-sm text-slate-200 hover:bg-slate-900/70"
+            >
+              Dashboard
+            </Link>
           </div>
         </div>
 
-        <div className="flex gap-3">
-          <Link href="/dashboard" className="text-sm text-orange-400 hover:underline">
-            ← Back to Dashboard
-          </Link>
-          <Link href="/incidents" className="text-sm text-orange-400 hover:underline">
-            View All Incidents →
-          </Link>
+        <p className="text-sm text-slate-300">
+          We couldn’t load this incident from the backend. If you navigated here from a department list, make sure the
+          URL includes a departmentId (example: <span className="text-slate-100">?departmentId=7</span>).
+        </p>
+
+        <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="text-sm font-semibold text-slate-100">Debug</div>
+              <div className="mt-1 text-xs text-slate-400">
+                This block is safe for demo use, but you can remove it later.
+              </div>
+            </div>
+            <span className="rounded-full border border-slate-700 bg-slate-900 px-3 py-1 text-xs text-slate-300">
+              Server fetch
+            </span>
+          </div>
+
+          <div className="mt-4 grid grid-cols-1 gap-3 text-xs sm:grid-cols-2">
+            <InfoRow label="Backend" value={backend} />
+            <InfoRow label="Raw params.id" value={String(rawIncidentId)} />
+            <InfoRow label="departmentId" value={rawDeptId ? String(rawDeptId) : "not provided"} />
+            <InfoRow label="Note" value={fetchNote ?? "Unknown error"} />
+          </div>
         </div>
       </div>
     );
   }
 
+  // --------- Detail UI ----------
   const when = fmtWhen(incident.occurred_at);
   const location = buildLocation(incident);
-  const title = incident.neris_incident_id ? `Incident ${incident.neris_incident_id}` : `Incident #${incident.id}`;
+
+  const title = incident.neris_incident_id
+    ? `Incident ${incident.neris_incident_id}`
+    : `Incident #${incident.id}`;
+
   const deptLabel =
     department?.name ?? (incident.department_id ? `Department #${incident.department_id}` : "Department");
 
-  return (
-    <div className="space-y-8">
-      <section className="space-y-2">
-        <div className="text-xs text-slate-400">Incident Case File</div>
-        <h1 className="text-2xl font-semibold">{title}</h1>
-        <div className="text-sm text-slate-300">{location}</div>
-      </section>
+  const status = getDemoStatus();
+  const methodology = getInvestigationMethodology();
 
-      <section className="flex flex-wrap items-center gap-6 rounded-lg border border-slate-800 bg-slate-900/60 p-4">
-        <StatusPill status={"Under Investigation"} />
-        <div className="text-sm">
-          <span className="text-slate-400">Occurred:</span> {when.local}
-          <div className="text-xs text-slate-500">UTC: {when.utc}</div>
+  return (
+    <div className="mx-auto w-full max-w-5xl space-y-6">
+      {/* Top header / actions */}
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
+            <span>Incident Case File</span>
+            <span className="text-slate-600">•</span>
+            <Link href={`/incidents${deptQuery}`} className="text-orange-400 hover:underline">
+              Incidents
+            </Link>
+            <span className="text-slate-600">/</span>
+            <span className="text-slate-300">{title}</span>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <h1 className="text-2xl font-semibold text-slate-100">{title}</h1>
+            <StatusPill status={status} />
+          </div>
+
+          <div className="text-sm text-slate-300">{location}</div>
         </div>
 
-        {incident.department_id ? (
-          <Link href={`/departments/${incident.department_id}`} className="text-sm text-orange-400 hover:underline">
-            {deptLabel}
+        <div className="flex flex-wrap items-center gap-3">
+          <Link
+            href={`/incidents${deptQuery}`}
+            className="rounded-md border border-slate-800 bg-slate-900/40 px-3 py-2 text-sm text-slate-200 hover:bg-slate-900/70"
+          >
+            ← Back to Incidents
           </Link>
-        ) : null}
+
+          {/* Keep disabled until you wire it up */}
+          <button
+            disabled
+            className="rounded-md border border-slate-800 bg-slate-900/30 px-3 py-2 text-sm text-slate-500"
+            title="Phase 3: PDF export"
+          >
+            Export PDF (Phase 3)
+          </button>
+        </div>
+      </div>
+
+      {/* Key facts */}
+      <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <h2 className="text-sm font-semibold text-slate-100">Key facts</h2>
+            <p className="mt-1 text-xs text-slate-400">
+              Organized for fast demo scanning and later NFPA 921 workflow expansion.
+            </p>
+          </div>
+
+          {incident.department_id ? (
+            <Link
+              href={`/departments/${incident.department_id}`}
+              className="text-sm text-orange-400 hover:underline"
+              title="Department profile"
+            >
+              {deptLabel} →
+            </Link>
+          ) : null}
+        </div>
+
+        <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <FactCard label="Occurred (Local)" value={when.local} subValue={`UTC: ${when.utc}`} />
+          <FactCard
+            label="NEMSIS / NERIS Incident ID"
+            value={incident.neris_incident_id ?? "Not provided"}
+            muted={!incident.neris_incident_id}
+          />
+          <FactCard
+            label="Department ID"
+            value={incident.department_id ? String(incident.department_id) : "Not provided"}
+            muted={!incident.department_id}
+          />
+
+          {/* ✅ NFPA-aligned field (real, demo-safe) */}
+          <FactCard
+            label="Investigation Methodology (NFPA 921)"
+            value={methodology}
+            subValue="Systematic approach supports courtroom credibility"
+          />
+
+          <FactCard
+            label="Record Updated"
+            value={incident.updated_at ? new Date(incident.updated_at).toLocaleString() : "Unknown"}
+            muted={!incident.updated_at}
+          />
+          <FactCard
+            label="Record Created"
+            value={incident.created_at ? new Date(incident.created_at).toLocaleString() : "Unknown"}
+            muted={!incident.created_at}
+          />
+        </div>
       </section>
 
-      <section className="rounded-lg border border-slate-800 bg-slate-900/60 p-6">
-        <h3 className="text-sm font-semibold text-orange-400">Investigation Notes</h3>
-        <p className="mt-2 text-sm text-slate-300">
-          Notes entered here are structured to support NFPA 921 methodology, separating observations, analysis, and
-          hypotheses.
+      {/* Notes */}
+      <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-6">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-sm font-semibold text-orange-400">Investigation Notes</h3>
+            <p className="mt-1 text-sm text-slate-300">
+              Structure notes to separate <span className="text-slate-100">observations</span>,{" "}
+              <span className="text-slate-100">analysis</span>, and{" "}
+              <span className="text-slate-100">hypotheses</span> to align with NFPA 921 methodology.
+            </p>
+          </div>
+
+          <span className="rounded-full border border-slate-700 bg-slate-900 px-3 py-1 text-xs text-slate-300">
+            Demo-ready
+          </span>
+        </div>
+
+        {/* Placeholder content area (read-only for now) */}
+        <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950/40 p-4">
+          <div className="text-xs font-semibold text-slate-200">Suggested format</div>
+          <ul className="mt-2 space-y-2 text-sm text-slate-300">
+            <li>
+              <span className="text-slate-100">Observations:</span> What is directly seen / measured (no conclusions).
+            </li>
+            <li>
+              <span className="text-slate-100">Analysis:</span> What the observations imply (supported by data).
+            </li>
+            <li>
+              <span className="text-slate-100">Hypotheses:</span> Possible explanations to test / validate.
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      {/* Tags */}
+      <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-6">
+        <h3 className="text-sm font-semibold text-orange-400">Tags</h3>
+        <p className="mt-2 text-sm text-slate-400">
+          Phase 2: add structured tags (Origin Work, Evidence, Interviews, Documentation, etc.).
         </p>
       </section>
 
-      <section className="rounded-lg border border-slate-800 bg-slate-900/60 p-6">
-        <h3 className="text-sm font-semibold text-orange-400">Tags</h3>
-      </section>
-
-      <section className="rounded-lg border border-slate-800 bg-slate-900/60 p-6">
+      {/* Evidence */}
+      <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-6">
         <h3 className="text-sm font-semibold text-orange-400">Evidence & Attachments</h3>
-        <p className="mt-2 text-sm text-slate-400">Photos, reports, and supporting documentation (Phase 2)</p>
+        <p className="mt-2 text-sm text-slate-400">
+          Photos, reports, and supporting documentation (Phase 2). This section is intentionally investor-friendly.
+        </p>
       </section>
 
+      {/* Bottom action */}
       <section className="flex justify-end">
-        <button disabled className="rounded bg-slate-700 px-4 py-2 text-sm text-slate-300 cursor-not-allowed">
+        <button
+          disabled
+          className="cursor-not-allowed rounded-md border border-slate-800 bg-slate-900/30 px-4 py-2 text-sm text-slate-500"
+          title="Phase 3: PDF export"
+        >
           Export Case File (PDF)
         </button>
       </section>
@@ -223,8 +389,45 @@ export default async function IncidentDetailPage({
 }
 
 function StatusPill({ status }: { status: string }) {
-  const color =
-    status === "Completed" ? "bg-green-600" : status === "Under Investigation" ? "bg-yellow-500" : "bg-slate-600";
+  const cls =
+    status === "Completed"
+      ? "border-green-500/30 bg-green-500/15 text-green-200"
+      : status === "Under Investigation"
+      ? "border-amber-500/30 bg-amber-500/15 text-amber-200"
+      : "border-slate-500/30 bg-slate-500/15 text-slate-200";
 
-  return <span className={`rounded-full px-3 py-1 text-xs font-semibold text-black ${color}`}>{status}</span>;
+  return (
+    <span className={cn("inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold", cls)}>
+      {status}
+    </span>
+  );
+}
+
+function FactCard({
+  label,
+  value,
+  subValue,
+  muted,
+}: {
+  label: string;
+  value: string;
+  subValue?: string;
+  muted?: boolean;
+}) {
+  return (
+    <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-4">
+      <div className="text-xs font-semibold text-slate-300">{label}</div>
+      <div className={cn("mt-1 text-sm font-semibold", muted ? "text-slate-400" : "text-slate-100")}>{value}</div>
+      {subValue ? <div className="mt-1 text-xs text-slate-500">{subValue}</div> : null}
+    </div>
+  );
+}
+
+function InfoRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-3">
+      <div className="text-[11px] font-semibold text-slate-400">{label}</div>
+      <div className="mt-1 break-words text-xs text-slate-200">{value}</div>
+    </div>
+  );
 }
