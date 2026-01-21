@@ -10,13 +10,11 @@ type Incident = {
   city?: string | null;
   state?: string | null;
 
-  // Existing ID
   neris_incident_id?: string | null;
 
-  // Optional — backend may or may not provide these yet
-  incident_type_code?: string | number | null; // e.g., "111" or 111
-  incident_type_description?: string | null; // e.g., "Building fire"
-  neris_incident_type_code?: string | number | null; // alternate naming some APIs use
+  incident_type_code?: string | number | null;
+  incident_type_description?: string | null;
+  neris_incident_type_code?: string | number | null;
 
   department_id: number;
   created_at?: string | null;
@@ -44,8 +42,13 @@ function formatLocalAndUtc(iso?: string | null) {
   };
 }
 
-function buildLocation(i: Incident) {
+function buildLocationParts(i: Incident) {
   const parts = [i.address, i.city, i.state].filter(Boolean) as string[];
+  return parts;
+}
+
+function buildLocation(i: Incident) {
+  const parts = buildLocationParts(i);
   return parts.length ? parts.join(", ") : "Unknown location";
 }
 
@@ -65,8 +68,42 @@ function formatIncidentType(incident: Incident): { code: string | null; desc: st
   return { code, desc };
 }
 
-function googleMapsSearchUrl(query: string) {
-  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
+function osmSearchUrl(query: string) {
+  return `https://www.openstreetmap.org/search?query=${encodeURIComponent(query)}`;
+}
+
+function osmEmbedUrl(lat: number, lon: number) {
+  // Tight bbox around point for a nice zoomed-in embed
+  const delta = 0.005; // ~0.5km-ish depending on latitude
+  const left = lon - delta;
+  const right = lon + delta;
+  const top = lat + delta;
+  const bottom = lat - delta;
+
+  // marker=lat,lon drops a pin
+  return `https://www.openstreetmap.org/export/embed.html?bbox=${left}%2C${bottom}%2C${right}%2C${top}&layer=mapnik&marker=${lat}%2C${lon}`;
+}
+
+type GeoPoint = { lat: number; lon: number };
+
+async function geocodeAddressToPoint(query: string): Promise<GeoPoint | null> {
+  // Nominatim usage policy expects a valid User-Agent (browser provides one)
+  // Keep this lightweight: 1 request per incident render.
+  const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=${encodeURIComponent(
+    query
+  )}`;
+
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) return null;
+
+  const data = (await res.json()) as Array<{ lat: string; lon: string }>;
+  if (!Array.isArray(data) || data.length === 0) return null;
+
+  const lat = Number(data[0].lat);
+  const lon = Number(data[0].lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+
+  return { lat, lon };
 }
 
 export default function IncidentDetailClient({
@@ -83,12 +120,17 @@ export default function IncidentDetailClient({
   const [tags, setTags] = useState<string[]>([]);
   const [tagDraft, setTagDraft] = useState("");
 
-  // ✅ NEW: IC narrative (local only)
+  // IC narrative
   const [icNarrative, setIcNarrative] = useState("");
 
-  // ✅ NEW: Actions Taken codes (local only, up to 3)
+  // Actions Taken (max 3)
   const [actionsTakenCodes, setActionsTakenCodes] = useState<string[]>([]);
   const [actionCodeDraft, setActionCodeDraft] = useState("");
+
+  // ✅ OSM geocode state
+  const [geoPoint, setGeoPoint] = useState<GeoPoint | null>(null);
+  const [geoLoading, setGeoLoading] = useState(false);
+  const [geoFailed, setGeoFailed] = useState(false);
 
   // Load from localStorage
   useEffect(() => {
@@ -105,11 +147,11 @@ export default function IncidentDetailClient({
       setIcNarrative(ic);
       setActionsTakenCodes(Array.isArray(at) ? at : []);
     } catch {
-      // ignore (private browsing, blocked storage, etc.)
+      // ignore
     }
   }, [keyBase]);
 
-  // Persist to localStorage
+  // Persist
   useEffect(() => {
     try {
       localStorage.setItem(`${keyBase}:notes`, notes);
@@ -134,6 +176,43 @@ export default function IncidentDetailClient({
     } catch {}
   }, [keyBase, actionsTakenCodes]);
 
+  // ✅ Geocode for OSM map
+  useEffect(() => {
+    const parts = buildLocationParts(incident);
+    if (parts.length === 0) return;
+
+    const query = parts.join(", ");
+
+    let cancelled = false;
+    (async () => {
+      try {
+        setGeoLoading(true);
+        setGeoFailed(false);
+
+        const pt = await geocodeAddressToPoint(query);
+        if (cancelled) return;
+
+        if (!pt) {
+          setGeoFailed(true);
+          setGeoPoint(null);
+        } else {
+          setGeoPoint(pt);
+        }
+      } catch {
+        if (!cancelled) {
+          setGeoFailed(true);
+          setGeoPoint(null);
+        }
+      } finally {
+        if (!cancelled) setGeoLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [incident.address, incident.city, incident.state]);
+
   const occurred = formatLocalAndUtc(incident.occurred_at);
   const title = incident.neris_incident_id
     ? `Incident ${incident.neris_incident_id}`
@@ -141,7 +220,6 @@ export default function IncidentDetailClient({
   const location = buildLocation(incident);
   const status = getDemoStatus();
   const methodology = getInvestigationMethodology();
-
   const { code: incidentTypeCode, desc: incidentTypeDesc } = formatIncidentType(incident);
 
   const backHref = departmentId
@@ -149,18 +227,16 @@ export default function IncidentDetailClient({
     : "/incidents";
 
   const mapsQuery = location === "Unknown location" ? "" : location;
-  const mapsHref = mapsQuery ? googleMapsSearchUrl(mapsQuery) : null;
+  const osmHref = mapsQuery ? osmSearchUrl(mapsQuery) : null;
 
   function addTag() {
     const t = tagDraft.trim();
     if (!t) return;
-
     const exists = tags.some((x) => x.toLowerCase() === t.toLowerCase());
     if (exists) {
       setTagDraft("");
       return;
     }
-
     setTags((prev) => [...prev, t]);
     setTagDraft("");
   }
@@ -173,20 +249,16 @@ export default function IncidentDetailClient({
     const raw = actionCodeDraft.trim();
     if (!raw) return;
 
-    // Codes are often numeric, but allow alphanumeric just in case
     const normalized = raw.toUpperCase();
 
     if (actionsTakenCodes.some((c) => c.toUpperCase() === normalized)) {
       setActionCodeDraft("");
       return;
     }
-
     if (actionsTakenCodes.length >= 3) {
-      // hard cap per your requirement (demo-safe)
       setActionCodeDraft("");
       return;
     }
-
     setActionsTakenCodes((prev) => [...prev, normalized]);
     setActionCodeDraft("");
   }
@@ -279,25 +351,25 @@ export default function IncidentDetailClient({
         </div>
       </section>
 
-      {/* Map */}
+      {/* ✅ OpenStreetMap */}
       <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h3 className="text-sm font-semibold text-orange-400">Location Map</h3>
             <p className="mt-1 text-xs text-slate-400">
-              Click opens Google Maps. (No API key required for this demo embed.)
+              Keyless OpenStreetMap embed + click-through for full map.
             </p>
           </div>
 
-          {mapsHref ? (
+          {osmHref ? (
             <a
               className="rounded-md border border-slate-800 bg-slate-900/40 px-3 py-2 text-sm text-slate-200 hover:bg-slate-900/70"
-              href={mapsHref}
+              href={osmHref}
               target="_blank"
               rel="noreferrer"
-              title="Open in Google Maps"
+              title="Open in OpenStreetMap"
             >
-              Open in Google Maps →
+              Open map →
             </a>
           ) : (
             <span className="text-xs text-slate-500">No address available</span>
@@ -305,26 +377,26 @@ export default function IncidentDetailClient({
         </div>
 
         <div className="mt-4 overflow-hidden rounded-lg border border-slate-800 bg-slate-950/40">
-          {mapsHref ? (
+          {!osmHref ? (
+            <div className="p-6 text-sm text-slate-400">No map preview (missing address).</div>
+          ) : geoLoading ? (
+            <div className="p-6 text-sm text-slate-400">Loading map preview…</div>
+          ) : geoFailed || !geoPoint ? (
+            <div className="p-6 text-sm text-slate-400">
+              Map preview unavailable (couldn’t geocode address). Use “Open map →”.
+            </div>
+          ) : (
             <iframe
-              title="Incident location map"
+              title="Incident location (OpenStreetMap)"
               className="h-72 w-full"
               loading="lazy"
-              referrerPolicy="no-referrer-when-downgrade"
-              src={mapsHref.replace("/maps/search/", "/maps/embed/v1/search/") /* not valid without key */}
+              src={osmEmbedUrl(geoPoint.lat, geoPoint.lon)}
             />
-          ) : (
-            <div className="p-6 text-sm text-slate-400">No map preview (missing address).</div>
           )}
         </div>
 
-        {/* NOTE:
-            Google Maps embed-v1 requires an API key. For keyless demo, we can’t reliably iframe Google Maps.
-            So we show a “map-style” panel with a big open button (above). If you want a real embedded map,
-            we can swap to OpenStreetMap embed (keyless) in the next pass.
-        */}
         <div className="mt-2 text-xs text-slate-500">
-          Tip: For a real embedded map without a Google API key, we can embed OpenStreetMap next.
+          Note: Map preview uses OpenStreetMap geocoding. For production, we can move geocoding server-side + add caching.
         </div>
       </section>
 
@@ -372,7 +444,9 @@ export default function IncidentDetailClient({
             <button
               className={cn(
                 "rounded-lg px-3 py-2 text-sm font-semibold text-white",
-                actionsTakenCodes.length >= 3 ? "bg-slate-700 cursor-not-allowed" : "bg-orange-600 hover:bg-orange-500"
+                actionsTakenCodes.length >= 3
+                  ? "bg-slate-700 cursor-not-allowed"
+                  : "bg-orange-600 hover:bg-orange-500"
               )}
               onClick={addActionCode}
               type="button"
