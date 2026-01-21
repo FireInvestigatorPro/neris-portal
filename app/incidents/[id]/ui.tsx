@@ -9,7 +9,15 @@ type Incident = {
   address?: string | null;
   city?: string | null;
   state?: string | null;
+
+  // Existing ID
   neris_incident_id?: string | null;
+
+  // ✅ NEW (optional) — backend may or may not provide these yet
+  incident_type_code?: string | number | null; // e.g., "111" or 111
+  incident_type_description?: string | null;   // e.g., "Building fire"
+  neris_incident_type_code?: string | number | null; // alternate naming some APIs use
+
   department_id: number;
   created_at?: string | null;
   updated_at?: string | null;
@@ -58,6 +66,22 @@ function getDemoStatus() {
   return "Under Investigation";
 }
 
+function formatIncidentType(incident: Incident): { code: string | null; desc: string | null } {
+  const rawCode =
+    incident.neris_incident_type_code ??
+    incident.incident_type_code ??
+    null;
+
+  const code =
+    rawCode === null || typeof rawCode === "undefined"
+      ? null
+      : String(rawCode).trim() || null;
+
+  const desc = incident.incident_type_description?.trim() || null;
+
+  return { code, desc };
+}
+
 export default function IncidentDetailClient({
   incident,
   departmentId,
@@ -103,6 +127,8 @@ export default function IncidentDetailClient({
   const location = buildLocation(incident);
   const status = getDemoStatus();
   const methodology = getInvestigationMethodology();
+
+  const { code: incidentTypeCode, desc: incidentTypeDesc } = formatIncidentType(incident);
 
   const backHref = departmentId ? `/incidents?departmentId=${encodeURIComponent(departmentId)}` : "/incidents";
 
@@ -170,27 +196,38 @@ export default function IncidentDetailClient({
 
         <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           <FactCard label="Occurred (Local)" value={occurred.local} subValue={`UTC: ${occurred.utc}`} />
+
           <FactCard
             label="NERIS Incident ID"
             value={incident.neris_incident_id ?? "Not provided"}
             muted={!incident.neris_incident_id}
           />
+
+          {/* ✅ NEW: Incident Type / Code (NERIS/NFIRS-style) */}
+          <FactCard
+            label="Incident Type (code)"
+            value={incidentTypeCode ?? "Not provided"}
+            subValue={incidentTypeDesc ?? undefined}
+            muted={!incidentTypeCode}
+          />
+
           <FactCard
             label="Investigation Methodology (NFPA 921)"
             value={methodology}
             subValue="Systematic approach supports courtroom credibility"
           />
+
           <FactCard
             label="Record Updated"
             value={incident.updated_at ? new Date(incident.updated_at).toLocaleString() : "Unknown"}
             muted={!incident.updated_at}
           />
+
           <FactCard
             label="Record Created"
             value={incident.created_at ? new Date(incident.created_at).toLocaleString() : "Unknown"}
             muted={!incident.created_at}
           />
-          <FactCard label="Location" value={location} />
         </div>
       </section>
 
@@ -276,7 +313,11 @@ function StatusPill({ status }: { status: string }) {
       ? "border-amber-500/30 bg-amber-500/15 text-amber-200"
       : "border-slate-500/30 bg-slate-500/15 text-slate-200";
 
-  return <span className={cn("inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold", cls)}>{status}</span>;
+  return (
+    <span className={cn("inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold", cls)}>
+      {status}
+    </span>
+  );
 }
 
 function FactCard({
