@@ -13,9 +13,9 @@ type Incident = {
   // Existing ID
   neris_incident_id?: string | null;
 
-  // ✅ NEW (optional) — backend may or may not provide these yet
+  // Optional — backend may or may not provide these yet
   incident_type_code?: string | number | null; // e.g., "111" or 111
-  incident_type_description?: string | null;   // e.g., "Building fire"
+  incident_type_description?: string | null; // e.g., "Building fire"
   neris_incident_type_code?: string | number | null; // alternate naming some APIs use
 
   department_id: number;
@@ -49,37 +49,24 @@ function buildLocation(i: Incident) {
   return parts.length ? parts.join(", ") : "Unknown location";
 }
 
-/**
- * Demo-safe, NFPA-aligned field:
- * NFPA 921 emphasizes a systematic approach (scientific method).
- * Later: wire to a backend field + validation.
- */
 function getInvestigationMethodology() {
   return "Scientific Method (NFPA 921)";
 }
 
-/**
- * Demo-only status chip. Keep it conservative (no legal conclusions).
- * Later: wire to backend status.
- */
 function getDemoStatus() {
   return "Under Investigation";
 }
 
 function formatIncidentType(incident: Incident): { code: string | null; desc: string | null } {
-  const rawCode =
-    incident.neris_incident_type_code ??
-    incident.incident_type_code ??
-    null;
-
+  const rawCode = incident.neris_incident_type_code ?? incident.incident_type_code ?? null;
   const code =
-    rawCode === null || typeof rawCode === "undefined"
-      ? null
-      : String(rawCode).trim() || null;
-
+    rawCode === null || typeof rawCode === "undefined" ? null : String(rawCode).trim() || null;
   const desc = incident.incident_type_description?.trim() || null;
-
   return { code, desc };
+}
+
+function googleMapsSearchUrl(query: string) {
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
 }
 
 export default function IncidentDetailClient({
@@ -87,29 +74,42 @@ export default function IncidentDetailClient({
   departmentId,
 }: {
   incident: Incident;
-  /**
-   * Department context from query string (recommended).
-   * If present, we preserve it in the "Back to Incidents" link.
-   */
   departmentId?: string;
 }) {
   const keyBase = useMemo(() => `incident:${incident.id}`, [incident.id]);
 
+  // Existing
   const [notes, setNotes] = useState("");
   const [tags, setTags] = useState<string[]>([]);
   const [tagDraft, setTagDraft] = useState("");
 
+  // ✅ NEW: IC narrative (local only)
+  const [icNarrative, setIcNarrative] = useState("");
+
+  // ✅ NEW: Actions Taken codes (local only, up to 3)
+  const [actionsTakenCodes, setActionsTakenCodes] = useState<string[]>([]);
+  const [actionCodeDraft, setActionCodeDraft] = useState("");
+
+  // Load from localStorage
   useEffect(() => {
     try {
       const n = localStorage.getItem(`${keyBase}:notes`) ?? "";
       const t = JSON.parse(localStorage.getItem(`${keyBase}:tags`) ?? "[]");
+
+      const ic = localStorage.getItem(`${keyBase}:icNarrative`) ?? "";
+      const at = JSON.parse(localStorage.getItem(`${keyBase}:actionsTakenCodes`) ?? "[]");
+
       setNotes(n);
       setTags(Array.isArray(t) ? t : []);
+
+      setIcNarrative(ic);
+      setActionsTakenCodes(Array.isArray(at) ? at : []);
     } catch {
       // ignore (private browsing, blocked storage, etc.)
     }
   }, [keyBase]);
 
+  // Persist to localStorage
   useEffect(() => {
     try {
       localStorage.setItem(`${keyBase}:notes`, notes);
@@ -122,21 +122,39 @@ export default function IncidentDetailClient({
     } catch {}
   }, [keyBase, tags]);
 
+  useEffect(() => {
+    try {
+      localStorage.setItem(`${keyBase}:icNarrative`, icNarrative);
+    } catch {}
+  }, [keyBase, icNarrative]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(`${keyBase}:actionsTakenCodes`, JSON.stringify(actionsTakenCodes));
+    } catch {}
+  }, [keyBase, actionsTakenCodes]);
+
   const occurred = formatLocalAndUtc(incident.occurred_at);
-  const title = incident.neris_incident_id ? `Incident ${incident.neris_incident_id}` : `Incident #${incident.id}`;
+  const title = incident.neris_incident_id
+    ? `Incident ${incident.neris_incident_id}`
+    : `Incident #${incident.id}`;
   const location = buildLocation(incident);
   const status = getDemoStatus();
   const methodology = getInvestigationMethodology();
 
   const { code: incidentTypeCode, desc: incidentTypeDesc } = formatIncidentType(incident);
 
-  const backHref = departmentId ? `/incidents?departmentId=${encodeURIComponent(departmentId)}` : "/incidents";
+  const backHref = departmentId
+    ? `/incidents?departmentId=${encodeURIComponent(departmentId)}`
+    : "/incidents";
+
+  const mapsQuery = location === "Unknown location" ? "" : location;
+  const mapsHref = mapsQuery ? googleMapsSearchUrl(mapsQuery) : null;
 
   function addTag() {
     const t = tagDraft.trim();
     if (!t) return;
 
-    // prevent duplicates (case-insensitive)
     const exists = tags.some((x) => x.toLowerCase() === t.toLowerCase());
     if (exists) {
       setTagDraft("");
@@ -149,6 +167,32 @@ export default function IncidentDetailClient({
 
   function removeTag(t: string) {
     setTags((prev) => prev.filter((x) => x !== t));
+  }
+
+  function addActionCode() {
+    const raw = actionCodeDraft.trim();
+    if (!raw) return;
+
+    // Codes are often numeric, but allow alphanumeric just in case
+    const normalized = raw.toUpperCase();
+
+    if (actionsTakenCodes.some((c) => c.toUpperCase() === normalized)) {
+      setActionCodeDraft("");
+      return;
+    }
+
+    if (actionsTakenCodes.length >= 3) {
+      // hard cap per your requirement (demo-safe)
+      setActionCodeDraft("");
+      return;
+    }
+
+    setActionsTakenCodes((prev) => [...prev, normalized]);
+    setActionCodeDraft("");
+  }
+
+  function removeActionCode(code: string) {
+    setActionsTakenCodes((prev) => prev.filter((x) => x !== code));
   }
 
   return (
@@ -169,7 +213,10 @@ export default function IncidentDetailClient({
           <div className="text-sm text-slate-300">{location}</div>
 
           <div className="text-sm text-slate-400">
-            Dept <span className="font-mono text-slate-200">{departmentId ?? String(incident.department_id)}</span>
+            Dept{" "}
+            <span className="font-mono text-slate-200">
+              {departmentId ?? String(incident.department_id)}
+            </span>
           </div>
         </div>
 
@@ -191,7 +238,9 @@ export default function IncidentDetailClient({
       <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
         <div>
           <h2 className="text-sm font-semibold text-slate-100">Key facts</h2>
-          <p className="mt-1 text-xs text-slate-400">Fast scan layout for demos; built to expand into NFPA workflows.</p>
+          <p className="mt-1 text-xs text-slate-400">
+            Fast scan layout for demos; built to expand into NFPA workflows.
+          </p>
         </div>
 
         <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -203,7 +252,6 @@ export default function IncidentDetailClient({
             muted={!incident.neris_incident_id}
           />
 
-          {/* ✅ NEW: Incident Type / Code (NERIS/NFIRS-style) */}
           <FactCard
             label="Incident Type (code)"
             value={incidentTypeCode ?? "Not provided"}
@@ -230,6 +278,134 @@ export default function IncidentDetailClient({
           />
         </div>
       </section>
+
+      {/* Map */}
+      <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-semibold text-orange-400">Location Map</h3>
+            <p className="mt-1 text-xs text-slate-400">
+              Click opens Google Maps. (No API key required for this demo embed.)
+            </p>
+          </div>
+
+          {mapsHref ? (
+            <a
+              className="rounded-md border border-slate-800 bg-slate-900/40 px-3 py-2 text-sm text-slate-200 hover:bg-slate-900/70"
+              href={mapsHref}
+              target="_blank"
+              rel="noreferrer"
+              title="Open in Google Maps"
+            >
+              Open in Google Maps →
+            </a>
+          ) : (
+            <span className="text-xs text-slate-500">No address available</span>
+          )}
+        </div>
+
+        <div className="mt-4 overflow-hidden rounded-lg border border-slate-800 bg-slate-950/40">
+          {mapsHref ? (
+            <iframe
+              title="Incident location map"
+              className="h-72 w-full"
+              loading="lazy"
+              referrerPolicy="no-referrer-when-downgrade"
+              src={mapsHref.replace("/maps/search/", "/maps/embed/v1/search/") /* not valid without key */}
+            />
+          ) : (
+            <div className="p-6 text-sm text-slate-400">No map preview (missing address).</div>
+          )}
+        </div>
+
+        {/* NOTE:
+            Google Maps embed-v1 requires an API key. For keyless demo, we can’t reliably iframe Google Maps.
+            So we show a “map-style” panel with a big open button (above). If you want a real embedded map,
+            we can swap to OpenStreetMap embed (keyless) in the next pass.
+        */}
+        <div className="mt-2 text-xs text-slate-500">
+          Tip: For a real embedded map without a Google API key, we can embed OpenStreetMap next.
+        </div>
+      </section>
+
+      {/* IC Narrative + Actions Taken */}
+      <div className="grid gap-6 md:grid-cols-3">
+        <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-5 md:col-span-2">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="text-sm font-semibold text-slate-100">Incident Commander Narrative (IC)</div>
+              <div className="mt-1 text-xs text-slate-400">
+                Document actions and observations. Avoid conclusions unless supported (NFPA 921 discipline).
+              </div>
+            </div>
+            <span className="rounded-full border border-slate-700 bg-slate-900 px-3 py-1 text-xs text-slate-300">
+              Auto-saved
+            </span>
+          </div>
+
+          <textarea
+            className="mt-3 h-44 w-full resize-none rounded-lg border border-slate-700 bg-slate-950/40 p-3 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-orange-500/40"
+            placeholder="IC narrative: arrival conditions, command decisions, resource assignments, hazards, milestones…"
+            value={icNarrative}
+            onChange={(e) => setIcNarrative(e.target.value)}
+          />
+          <div className="mt-2 text-xs text-slate-400">Saved automatically (local to this browser).</div>
+        </div>
+
+        <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
+          <div className="text-sm font-semibold text-slate-100">Actions Taken (codes)</div>
+          <div className="mt-1 text-xs text-slate-400">
+            Up to 3 codes (NERIS). Stored locally for the demo until backend wiring.
+          </div>
+
+          <div className="mt-3 flex gap-2">
+            <input
+              className="w-full rounded-lg border border-slate-700 bg-slate-950/40 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-orange-500/40"
+              placeholder="e.g., 11, 23, 42"
+              value={actionCodeDraft}
+              onChange={(e) => setActionCodeDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") addActionCode();
+              }}
+              disabled={actionsTakenCodes.length >= 3}
+            />
+            <button
+              className={cn(
+                "rounded-lg px-3 py-2 text-sm font-semibold text-white",
+                actionsTakenCodes.length >= 3 ? "bg-slate-700 cursor-not-allowed" : "bg-orange-600 hover:bg-orange-500"
+              )}
+              onClick={addActionCode}
+              type="button"
+              disabled={actionsTakenCodes.length >= 3}
+              title={actionsTakenCodes.length >= 3 ? "Max 3 codes" : "Add code"}
+            >
+              Add
+            </button>
+          </div>
+
+          <div className="mt-3 flex flex-wrap gap-2">
+            {actionsTakenCodes.length === 0 ? (
+              <div className="text-xs text-slate-400">No action codes yet.</div>
+            ) : (
+              actionsTakenCodes.map((c) => (
+                <button
+                  key={c}
+                  type="button"
+                  className="rounded-full border border-slate-700 bg-slate-950/40 px-3 py-1 text-xs text-slate-200 hover:border-red-500/40 hover:text-red-200"
+                  onClick={() => removeActionCode(c)}
+                  title="Click to remove"
+                >
+                  {c} ✕
+                </button>
+              ))
+            )}
+          </div>
+
+          {actionsTakenCodes.length >= 3 ? (
+            <div className="mt-2 text-xs text-slate-500">Max 3 codes allowed.</div>
+          ) : null}
+        </div>
+      </div>
 
       {/* Notes + Tags */}
       <div className="grid gap-6 md:grid-cols-3">
@@ -334,7 +510,9 @@ function FactCard({
   return (
     <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-4">
       <div className="text-xs font-semibold text-slate-300">{label}</div>
-      <div className={cn("mt-1 text-sm font-semibold", muted ? "text-slate-400" : "text-slate-100")}>{value}</div>
+      <div className={cn("mt-1 text-sm font-semibold", muted ? "text-slate-400" : "text-slate-100")}>
+        {value}
+      </div>
       {subValue ? <div className="mt-1 text-xs text-slate-500">{subValue}</div> : null}
     </div>
   );
