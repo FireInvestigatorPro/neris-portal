@@ -22,6 +22,16 @@ type ApiIncident = {
   city: string | null;
   state: string | null;
   neris_incident_id: string | null;
+
+  // Optional (demo-safe): if/when backend provides it, we color-code by NERIS incident type.
+  // Common candidates you might expose later:
+  // - incident_type_code
+  // - incident_type
+  // - neris_incident_type_code
+  incident_type_code?: number | string | null;
+  incident_type?: number | string | null;
+  neris_incident_type_code?: number | string | null;
+
   created_at?: string;
   updated_at?: string;
 };
@@ -88,8 +98,86 @@ function byMostRecent(a: ApiIncident, b: ApiIncident) {
   return db - da;
 }
 
+function cn(...classes: Array<string | false | null | undefined>) {
+  return classes.filter(Boolean).join(" ");
+}
+
 // ----------------------
-// Hotspot Map helpers
+// NERIS category coloring (demo-safe)
+// ----------------------
+
+type IncidentCategoryKey = "structure" | "vehicle" | "outside" | "other" | "unknown";
+
+function asNumber(v: unknown): number | null {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string") {
+    const n = Number(v.trim());
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
+}
+
+/**
+ * Best-effort extraction. You can later standardize the backend field name.
+ */
+function getIncidentTypeCode(i: ApiIncident): number | null {
+  return (
+    asNumber(i.incident_type_code) ??
+    asNumber(i.neris_incident_type_code) ??
+    asNumber(i.incident_type) ??
+    null
+  );
+}
+
+/**
+ * Simple, defensible mapping:
+ * - This is CATEGORY coloring, not severity or cause.
+ * - Adjust ranges later to match your department’s NERIS usage.
+ */
+function classifyIncident(i: ApiIncident): IncidentCategoryKey {
+  const code = getIncidentTypeCode(i);
+  if (code == null) return "unknown";
+
+  // Common demo ranges (you can tune later):
+  if (code >= 111 && code <= 118) return "structure";
+  if (code >= 130 && code <= 138) return "vehicle";
+  if (code >= 140 && code <= 170) return "outside";
+
+  // If the backend eventually gives you a broader code system, keep "other" for everything else.
+  return "other";
+}
+
+function categoryMeta(key: IncidentCategoryKey) {
+  switch (key) {
+    case "structure":
+      return { label: "Structure Fire", dot: "bg-red-500", pill: "border-red-500/30 bg-red-500/10 text-red-200" };
+    case "vehicle":
+      return { label: "Vehicle Fire", dot: "bg-orange-500", pill: "border-orange-500/30 bg-orange-500/10 text-orange-200" };
+    case "outside":
+      return { label: "Outside Fire", dot: "bg-yellow-400", pill: "border-yellow-400/30 bg-yellow-400/10 text-yellow-100" };
+    case "other":
+      return { label: "Other", dot: "bg-blue-500", pill: "border-blue-500/30 bg-blue-500/10 text-blue-200" };
+    default:
+      return { label: "Unknown", dot: "bg-slate-400", pill: "border-slate-500/30 bg-slate-500/10 text-slate-200" };
+  }
+}
+
+function CategoryPill({ incident }: { incident: ApiIncident }) {
+  const key = classifyIncident(incident);
+  const meta = categoryMeta(key);
+  const code = getIncidentTypeCode(incident);
+
+  return (
+    <span className={cn("inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-[11px] font-semibold", meta.pill)}>
+      <span className={cn("h-2 w-2 rounded-full", meta.dot)} />
+      {meta.label}
+      {code != null ? <span className="font-mono text-[10px] opacity-80">({code})</span> : null}
+    </span>
+  );
+}
+
+// ----------------------
+// Hotspot Map helpers (OSM + Nominatim)
 // ----------------------
 
 type GeoPoint = { lat: number; lon: number };
@@ -99,6 +187,7 @@ type IncidentPin = {
   locationText: string;
   occurredAt?: string | null;
   point: GeoPoint;
+  incident: ApiIncident; // keep original so we can color-code list items
 };
 
 function buildQueryFromIncident(i: ApiIncident) {
@@ -116,7 +205,7 @@ function osmSearchUrl(query: string) {
 }
 
 function osmEmbedUrl(lat: number, lon: number) {
-  const delta = 0.02; // bigger bbox on dept view
+  const delta = 0.02;
   const left = lon - delta;
   const right = lon + delta;
   const top = lat + delta;
@@ -126,9 +215,7 @@ function osmEmbedUrl(lat: number, lon: number) {
 }
 
 async function geocodeToPoint(query: string): Promise<GeoPoint | null> {
-  const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=${encodeURIComponent(
-    query
-  )}`;
+  const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=${encodeURIComponent(query)}`;
 
   const res = await fetch(url, { cache: "no-store" });
   if (!res.ok) return null;
@@ -143,8 +230,8 @@ async function geocodeToPoint(query: string): Promise<GeoPoint | null> {
   return { lat, lon };
 }
 
-function cn(...classes: Array<string | false | null | undefined>) {
-  return classes.filter(Boolean).join(" ");
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 export default function DepartmentDetailPage() {
@@ -178,7 +265,7 @@ export default function DepartmentDetailPage() {
       setDept(null);
       setIncidents([]);
 
-      // Reset map on dept change
+      // Reset map state on dept change
       setDeptCenter(null);
       setPins([]);
       setMapNote(null);
@@ -251,12 +338,14 @@ export default function DepartmentDetailPage() {
 
   // Build hotspot map once dept + incidents are loaded
   useEffect(() => {
-    if (!dept || incidents.length === 0) return;
+    if (!dept) return;
 
     const deptQuery = buildDeptQuery(dept);
+
+    // We geocode a small, recent subset to stay demo-fast and reduce rate-limit risk.
     const incidentCandidates = incidents
       .filter((i) => Boolean(i.address || i.city || i.state))
-      .slice(0, 15); // keep demo snappy and reduce geocode calls
+      .slice(0, 15);
 
     let cancelled = false;
 
@@ -280,15 +369,19 @@ export default function DepartmentDetailPage() {
           if (!q) continue;
 
           const pt = await geocodeToPoint(q);
-          if (!pt) continue;
+          if (pt) {
+            builtPins.push({
+              incidentId: i.id,
+              label: i.neris_incident_id ? String(i.neris_incident_id) : `Incident #${i.id}`,
+              locationText: q,
+              occurredAt: i.occurred_at ?? i.created_at ?? null,
+              point: pt,
+              incident: i,
+            });
+          }
 
-          builtPins.push({
-            incidentId: i.id,
-            label: i.neris_incident_id ? String(i.neris_incident_id) : `Incident #${i.id}`,
-            locationText: q,
-            occurredAt: i.occurred_at ?? i.created_at ?? null,
-            point: pt,
-          });
+          // Small delay helps avoid demo-day rate limits.
+          await sleep(350);
         }
 
         if (!cancelled) {
@@ -296,7 +389,7 @@ export default function DepartmentDetailPage() {
           setMapNote(
             builtPins.length > 0
               ? `Showing ${builtPins.length} pinned incident(s) (demo limit).`
-              : "No mappable incident addresses found."
+              : "No mappable incident addresses found (or geocode limits)."
           );
         }
       } catch {
@@ -353,6 +446,7 @@ export default function DepartmentDetailPage() {
 
       {!loading && dept && (
         <>
+          {/* Dept header card */}
           <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-4">
             <div className="flex flex-col gap-2">
               <div className="text-lg font-semibold text-slate-100">{dept.name}</div>
@@ -369,17 +463,13 @@ export default function DepartmentDetailPage() {
 
               <div className="mt-3 grid gap-3 sm:grid-cols-3">
                 <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
-                  <div className="text-[10px] uppercase tracking-wide text-slate-400">
-                    Total incidents
-                  </div>
+                  <div className="text-[10px] uppercase tracking-wide text-slate-400">Total incidents</div>
                   <div className="text-xl font-semibold text-slate-100">{totalIncidents}</div>
                   <div className="text-[11px] text-slate-400">Demo DB count</div>
                 </div>
 
                 <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
-                  <div className="text-[10px] uppercase tracking-wide text-slate-400">
-                    Most recent incident
-                  </div>
+                  <div className="text-[10px] uppercase tracking-wide text-slate-400">Most recent incident</div>
                   {mostRecent ? (
                     <DateBlock iso={mostRecent.occurred_at ?? mostRecent.created_at ?? null} />
                   ) : (
@@ -388,9 +478,7 @@ export default function DepartmentDetailPage() {
                 </div>
 
                 <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
-                  <div className="text-[10px] uppercase tracking-wide text-slate-400">
-                    Department updated
-                  </div>
+                  <div className="text-[10px] uppercase tracking-wide text-slate-400">Department updated</div>
                   <DateBlock iso={dept.updated_at ?? null} />
                 </div>
               </div>
@@ -406,15 +494,13 @@ export default function DepartmentDetailPage() {
             </div>
           </div>
 
-          {/* ✅ NEW: Hotspot Map */}
+          {/* ✅ Hotspot Map + A) Color legend + colored incident rows */}
           <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
             <div className="flex items-start justify-between gap-3">
               <div>
-                <div className="text-sm font-semibold text-slate-100">
-                  NERIS Hotspot Intelligence Map
-                </div>
+                <div className="text-sm font-semibold text-slate-100">NERIS Hotspot Intelligence Map</div>
                 <div className="mt-1 text-[11px] text-slate-400">
-                  Demo view: pin recent incidents by address. Next step: cluster into hotspot circles by density.
+                  Demo view: pin recent incidents by address. Next: cluster into hotspot circles by density.
                 </div>
               </div>
 
@@ -430,6 +516,34 @@ export default function DepartmentDetailPage() {
               ) : null}
             </div>
 
+            {/* A) Legend */}
+            <div className="mt-3 rounded-md border border-slate-800 bg-slate-950/20 p-3">
+              <div className="text-[10px] uppercase tracking-wide text-slate-400">Category legend (NERIS)</div>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {(["structure", "vehicle", "outside", "other", "unknown"] as IncidentCategoryKey[]).map((k) => {
+                  const meta = categoryMeta(k);
+                  return (
+                    <span
+                      key={k}
+                      className={cn(
+                        "inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-[11px] font-semibold",
+                        meta.pill
+                      )}
+                      title="Category coloring (not severity or cause)"
+                    >
+                      <span className={cn("h-2 w-2 rounded-full", meta.dot)} />
+                      {meta.label}
+                    </span>
+                  );
+                })}
+              </div>
+              <div className="mt-2 text-[11px] text-slate-500">
+                Colors reflect <span className="text-slate-300">NERIS incident categories</span> — not severity, cause,
+                or conclusions (NFPA-aligned discipline).
+              </div>
+            </div>
+
+            {/* Map */}
             <div className="mt-3 overflow-hidden rounded-md border border-slate-800 bg-slate-950/30">
               {deptCenter ? (
                 <iframe
@@ -446,19 +560,16 @@ export default function DepartmentDetailPage() {
             </div>
 
             <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-              <div className="text-[11px] text-slate-400">
-                {mapNote ?? (mapLoading ? "Geocoding…" : "—")}
-              </div>
-              <div className="text-[11px] text-slate-500">
-                Pins are clickable below (map pin overlay is Phase 2).
-              </div>
+              <div className="text-[11px] text-slate-400">{mapNote ?? (mapLoading ? "Geocoding…" : "—")}</div>
+              <div className="text-[11px] text-slate-500">Map overlays (colored pins) come in step B (Leaflet).</div>
             </div>
 
-            {/* Pins list (click to incident) */}
+            {/* Pins list (click to incident) — now color-coded */}
             <div className="mt-3 grid gap-2 sm:grid-cols-2">
               {pins.length === 0 ? (
                 <div className="text-xs text-slate-300">
-                  No pinned incidents yet (missing addresses or geocode limits).
+                  No pinned incidents yet (missing addresses or geocode limits). The list below still shows category
+                  coloring when the incident type code is available.
                 </div>
               ) : (
                 pins.map((p) => (
@@ -469,9 +580,12 @@ export default function DepartmentDetailPage() {
                     title={p.locationText}
                   >
                     <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <div className="text-xs font-semibold text-slate-100">{p.label}</div>
-                        <div className="mt-1 text-[11px] text-slate-400">{p.locationText}</div>
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <div className="text-xs font-semibold text-slate-100">{p.label}</div>
+                          <CategoryPill incident={p.incident} />
+                        </div>
+                        <div className="mt-1 truncate text-[11px] text-slate-400">{p.locationText}</div>
                       </div>
                       <div className="text-right text-[11px]">
                         <DateBlock iso={p.occurredAt ?? null} />
@@ -484,10 +598,11 @@ export default function DepartmentDetailPage() {
 
             <div className="mt-3 text-[11px] text-slate-500">
               Future: convert pins into <span className="text-slate-300">hotspot circles</span> (clustered by distance),
-              sized by incident count, and filtered by incident type/time range.
+              sized by incident count, filterable by time window and NERIS type.
             </div>
           </div>
 
+          {/* Recent incidents list — now color-coded */}
           <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
             <div className="flex items-center justify-between">
               <div className="text-sm font-semibold text-slate-100">Recent incidents</div>
@@ -495,9 +610,7 @@ export default function DepartmentDetailPage() {
             </div>
 
             {incidents.length === 0 ? (
-              <div className="mt-3 text-xs text-slate-300">
-                No incidents yet for this department.
-              </div>
+              <div className="mt-3 text-xs text-slate-300">No incidents yet for this department.</div>
             ) : (
               <div className="mt-3 space-y-2">
                 {incidents.slice(0, 10).map((i) => (
@@ -507,11 +620,14 @@ export default function DepartmentDetailPage() {
                     className="block rounded-md border border-slate-800 bg-slate-950/30 p-3 hover:border-orange-400"
                   >
                     <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <div className="text-xs font-semibold text-slate-100">
-                          {i.neris_incident_id ? i.neris_incident_id : `Incident #${i.id}`}
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <div className="text-xs font-semibold text-slate-100">
+                            {i.neris_incident_id ? i.neris_incident_id : `Incident #${i.id}`}
+                          </div>
+                          <CategoryPill incident={i} />
                         </div>
-                        <div className="mt-1 text-[11px] text-slate-400">{joinLocation(i)}</div>
+                        <div className="mt-1 truncate text-[11px] text-slate-400">{joinLocation(i)}</div>
                       </div>
                       <div className="text-right text-[11px]">
                         <DateBlock iso={i.occurred_at} />
@@ -524,11 +640,10 @@ export default function DepartmentDetailPage() {
           </div>
 
           <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-4">
-            <div className="text-[10px] uppercase tracking-wide text-slate-400">
-              Tomorrow’s “wow” upgrade for this page
-            </div>
+            <div className="text-[10px] uppercase tracking-wide text-slate-400">Tomorrow’s “wow” upgrade for this page</div>
             <div className="mt-1 text-[11px] text-slate-300">
-              Add filters: last 30/90 days, incident type code, and “cluster view” toggles for hotspot circles.
+              Step B: replace the static embed with a Leaflet map so pins render on-map, color-coded by NERIS category,
+              clickable, and ready for clustering.
             </div>
           </div>
         </>
