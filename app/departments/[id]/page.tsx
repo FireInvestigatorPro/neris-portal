@@ -115,10 +115,6 @@ function joinLocation(i: ApiIncident) {
   return [i.address, i.city, i.state].filter(Boolean).join(", ") || "—";
 }
 
-// ----------------------
-// NERIS category coloring (demo-safe)
-// ----------------------
-
 function asNumber(v: unknown): number | null {
   if (typeof v === "number" && Number.isFinite(v)) return v;
   if (typeof v === "string") {
@@ -207,10 +203,6 @@ function CategoryPill({ incident }: { incident: ApiIncident }) {
     </span>
   );
 }
-
-// ----------------------
-// Time + Type filter UI
-// ----------------------
 
 function timeRangeLabel(key: TimeRangeKey) {
   switch (key) {
@@ -339,10 +331,6 @@ function MapModeToggle({ value, onChange }: { value: MapMode; onChange: (v: MapM
   );
 }
 
-// ----------------------
-// Geocode helpers
-// ----------------------
-
 function buildQueryFromIncident(i: ApiIncident) {
   const parts = [i.address, i.city, i.state].filter(Boolean) as string[];
   return parts.join(", ");
@@ -394,10 +382,6 @@ function byMostRecent(a: ApiIncident, b: ApiIncident) {
   const db = new Date(getIncidentTimestampIso(b) ?? 0).getTime();
   return db - da;
 }
-
-// ----------------------
-// Clustering (simple + demo-safe)
-// ----------------------
 
 function haversineMeters(a: GeoPoint, b: GeoPoint) {
   const R = 6371000;
@@ -476,22 +460,20 @@ function computeClusters(pins: IncidentPin[], thresholdMeters: number): HotspotC
   return clusters.sort((a, b) => b.count - a.count);
 }
 
-// ----------------------
-// Leaflet Map (pins OR hotspots)
-// ----------------------
-
 function HotspotLeafletMap({
   center,
   pins,
   clusters,
   departmentId,
   mode,
+  onHotspotClick,
 }: {
   center: GeoPoint | null;
   pins: IncidentPin[];
   clusters: HotspotCluster[];
   departmentId: number;
   mode: MapMode;
+  onHotspotClick: (cluster: HotspotCluster) => void;
 }) {
   const mapDivRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<any>(null);
@@ -679,11 +661,12 @@ function HotspotLeafletMap({
           <div style="font-size:12px; line-height: 1.25;">
             <div style="font-weight:800; margin-bottom:4px;">Hotspot: ${c.count} incidents</div>
             <div style="opacity:0.85; margin-bottom:4px;">Dominant category: ${safeCat}</div>
-            <div style="opacity:0.85;">Zoom in to explore pins in this area.</div>
+            <div style="opacity:0.85;">Click to drill down.</div>
           </div>
         `);
 
         circle.on("click", () => {
+          onHotspotClick(c);
           try {
             map.setView([c.center.lat, c.center.lon], Math.max(map.getZoom(), 14), { animate: true });
           } catch {}
@@ -703,7 +686,7 @@ function HotspotLeafletMap({
     } else if (bounds.length === 1) {
       map.setView(bounds[0], mode === "pins" ? 14 : 13, { animate: true });
     }
-  }, [leafletReady, pins, clusters, departmentId, mode]);
+  }, [leafletReady, pins, clusters, departmentId, mode, onHotspotClick]);
 
   if (leafletError) {
     return <div className="p-4 text-xs text-red-200">Map failed to load: {leafletError}</div>;
@@ -715,10 +698,6 @@ function HotspotLeafletMap({
 
   return <div ref={mapDivRef} className="h-80 w-full" aria-label="Interactive hotspot map" />;
 }
-
-// ----------------------
-// Page
-// ----------------------
 
 export default function DepartmentDetailPage() {
   const params = useParams<{ id: string }>();
@@ -733,7 +712,6 @@ export default function DepartmentDetailPage() {
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // #1 polish defaults: Hotspots + 90d + All
   const [timeRange, setTimeRange] = useState<TimeRangeKey>("90");
   const [mapMode, setMapMode] = useState<MapMode>("hotspots");
   const [typeFilter, setTypeFilter] = useState<TypeFilterKey>("all");
@@ -743,12 +721,16 @@ export default function DepartmentDetailPage() {
   const [mapLoading, setMapLoading] = useState(false);
   const [mapNote, setMapNote] = useState<string | null>(null);
 
+  // NEW: selected cluster drilldown
+  const [selectedCluster, setSelectedCluster] = useState<HotspotCluster | null>(null);
+
   const isValidId = useMemo(() => Number.isFinite(deptId) && deptId > 0, [deptId]);
 
   function resetFilters() {
     setTimeRange("90");
     setTypeFilter("all");
     setMapMode("hotspots");
+    setSelectedCluster(null);
   }
 
   useEffect(() => {
@@ -764,6 +746,7 @@ export default function DepartmentDetailPage() {
       setDeptCenter(null);
       setPins([]);
       setMapNote(null);
+      setSelectedCluster(null);
 
       if (!isValidId) {
         setError(`Invalid department id: "${idStr}"`);
@@ -823,7 +806,6 @@ export default function DepartmentDetailPage() {
     };
   }, [apiBase, deptId, idStr, isValidId]);
 
-  // Category-only set (for 30 vs 90 trend, independent of selected timeRange)
   const categoryFilteredAllTime = useMemo(() => {
     if (typeFilter === "all") return incidents;
     return incidents.filter((i) => classifyIncident(i) === typeFilter);
@@ -839,7 +821,6 @@ export default function DepartmentDetailPage() {
     return categoryFilteredAllTime.filter((i) => isWithinLastNDays(i, 90, now)).length;
   }, [categoryFilteredAllTime]);
 
-  // Time filter first
   const timeFilteredIncidents = useMemo(() => {
     const days = timeRangeDays(timeRange);
     if (!days) return incidents;
@@ -847,13 +828,11 @@ export default function DepartmentDetailPage() {
     return incidents.filter((i) => isWithinLastNDays(i, days, nowMs));
   }, [incidents, timeRange]);
 
-  // Then type filter
   const filteredIncidents = useMemo(() => {
     if (typeFilter === "all") return timeFilteredIncidents;
     return timeFilteredIncidents.filter((i) => classifyIncident(i) === typeFilter);
   }, [timeFilteredIncidents, typeFilter]);
 
-  // Geocode pins from filtered incidents
   useEffect(() => {
     if (!dept) return;
 
@@ -867,6 +846,7 @@ export default function DepartmentDetailPage() {
     (async () => {
       setMapLoading(true);
       setMapNote("Geocoding map points…");
+      setSelectedCluster(null);
 
       try {
         if (deptQuery) {
@@ -893,7 +873,6 @@ export default function DepartmentDetailPage() {
             });
           }
 
-          // Nominatim is rate-limited: this is demo-safe pacing
           await sleep(350);
         }
 
@@ -920,8 +899,14 @@ export default function DepartmentDetailPage() {
   }, [dept, filteredIncidents, timeRange, typeFilter]);
 
   const clusters = useMemo(() => computeClusters(pins, 250), [pins]);
-
   const topCluster = clusters[0] ?? null;
+
+  // If filters change and selected cluster no longer exists, clear it
+  useEffect(() => {
+    if (!selectedCluster) return;
+    const stillExists = clusters.some((c) => c.id === selectedCluster.id);
+    if (!stillExists) setSelectedCluster(null);
+  }, [clusters, selectedCluster]);
 
   const totalIncidents = incidents.length;
   const showingIncidents = filteredIncidents.length;
@@ -932,6 +917,19 @@ export default function DepartmentDetailPage() {
 
   const activeFiltersText =
     `${timeRangeLabel(timeRange)} • ` + (typeFilter === "all" ? "All categories" : categoryMeta(typeFilter).label);
+
+  const drilldownPins = useMemo(() => {
+    if (!selectedCluster) return [];
+    // Sort by most recent timestamp descending (best for demo)
+    return selectedCluster.pins
+      .slice()
+      .sort((a, b) => {
+        const ta = new Date(a.occurredAt ?? 0).getTime();
+        const tb = new Date(b.occurredAt ?? 0).getTime();
+        return tb - ta;
+      })
+      .slice(0, 12);
+  }, [selectedCluster]);
 
   return (
     <section className="space-y-4">
@@ -1018,7 +1016,6 @@ export default function DepartmentDetailPage() {
             </div>
           </div>
 
-          {/* Map + Controls */}
           <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
             <div className="flex items-start justify-between gap-3">
               <div>
@@ -1030,7 +1027,13 @@ export default function DepartmentDetailPage() {
               </div>
 
               <div className="flex items-center gap-2">
-                <MapModeToggle value={mapMode} onChange={setMapMode} />
+                <MapModeToggle
+                  value={mapMode}
+                  onChange={(v) => {
+                    setMapMode(v);
+                    if (v === "pins") setSelectedCluster(null);
+                  }}
+                />
                 <button
                   type="button"
                   className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100 hover:border-orange-400"
@@ -1073,7 +1076,7 @@ export default function DepartmentDetailPage() {
               </div>
             </div>
 
-            {/* Insights Panel (#2) */}
+            {/* Insights */}
             <div className="mt-3 rounded-md border border-slate-800 bg-slate-950/20 p-3">
               <div className="flex items-start justify-between gap-3">
                 <div>
@@ -1119,7 +1122,7 @@ export default function DepartmentDetailPage() {
                         <span className="text-slate-200">{categoryMeta(topCluster.dominantCategory).label}</span>
                       </div>
                       <div className="mt-2 text-[11px] text-slate-500">
-                        Hotspots are density indicators for planning—not conclusions.
+                        Tip: click a hotspot circle to drill down.
                       </div>
                     </>
                   ) : (
@@ -1131,33 +1134,6 @@ export default function DepartmentDetailPage() {
               </div>
             </div>
 
-            {/* Legend */}
-            <div className="mt-3 rounded-md border border-slate-800 bg-slate-950/20 p-3">
-              <div className="text-[10px] uppercase tracking-wide text-slate-400">Category legend (NERIS)</div>
-              <div className="mt-2 flex flex-wrap gap-2">
-                {(["structure", "vehicle", "outside", "other", "unknown"] as IncidentCategoryKey[]).map((k) => {
-                  const meta = categoryMeta(k);
-                  return (
-                    <span
-                      key={k}
-                      className={cn(
-                        "inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-[11px] font-semibold",
-                        meta.pill
-                      )}
-                      title="Category coloring (not severity or cause)"
-                    >
-                      <span className={cn("h-2 w-2 rounded-full", meta.dot)} />
-                      {meta.label}
-                    </span>
-                  );
-                })}
-              </div>
-              <div className="mt-2 text-[11px] text-slate-500">
-                Colors reflect <span className="text-slate-300">NERIS incident categories</span> — not severity, cause,
-                or conclusions (NFPA-aligned discipline).
-              </div>
-            </div>
-
             <div className="mt-3 overflow-hidden rounded-md border border-slate-800 bg-slate-950/30">
               <HotspotLeafletMap
                 center={deptCenter}
@@ -1165,6 +1141,7 @@ export default function DepartmentDetailPage() {
                 clusters={clusters}
                 departmentId={dept.id}
                 mode={mapMode}
+                onHotspotClick={(c) => setSelectedCluster(c)}
               />
             </div>
 
@@ -1177,7 +1154,64 @@ export default function DepartmentDetailPage() {
               </div>
             </div>
 
-            {/* Pin list */}
+            {/* NEW: Hotspot Drilldown */}
+            {mapMode === "hotspots" && selectedCluster ? (
+              <div className="mt-3 rounded-md border border-slate-800 bg-slate-950/20 p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-[10px] uppercase tracking-wide text-slate-400">Hotspot drilldown</div>
+                    <div className="mt-1 text-[11px] text-slate-300">
+                      <span className="text-slate-100 font-semibold">{selectedCluster.count}</span> incident(s) in this
+                      cluster • Dominant:{" "}
+                      <span className="text-slate-100">{categoryMeta(selectedCluster.dominantCategory).label}</span>
+                    </div>
+                    <div className="mt-1 text-[11px] text-slate-500">
+                      Drilldown supports triage/workflow; it does not imply cause or conclusions.
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100 hover:border-orange-400"
+                    onClick={() => setSelectedCluster(null)}
+                  >
+                    Clear
+                  </button>
+                </div>
+
+                <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                  {drilldownPins.map((p) => (
+                    <Link
+                      key={p.incidentId}
+                      href={`/incidents/${p.incidentId}?departmentId=${dept.id}`}
+                      className="block rounded-md border border-slate-800 bg-slate-950/30 p-3 hover:border-orange-400"
+                      title={p.locationText}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <div className="text-xs font-semibold text-slate-100">{p.label}</div>
+                            <CategoryPill incident={p.incident} />
+                          </div>
+                          <div className="mt-1 truncate text-[11px] text-slate-400">{p.locationText}</div>
+                        </div>
+                        <div className="text-right text-[11px]">
+                          <DateBlock iso={p.occurredAt ?? null} />
+                        </div>
+                      </div>
+                    </Link>
+                  ))}
+                </div>
+
+                {selectedCluster.count > drilldownPins.length ? (
+                  <div className="mt-2 text-[11px] text-slate-500">
+                    Showing {drilldownPins.length} of {selectedCluster.count} incidents in this cluster.
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
+            {/* Pins list */}
             <div className="mt-3 grid gap-2 sm:grid-cols-2">
               {pins.length === 0 ? (
                 <div className="text-xs text-slate-300">No pinned incidents match the active filters.</div>
@@ -1205,45 +1239,6 @@ export default function DepartmentDetailPage() {
                 ))
               )}
             </div>
-          </div>
-
-          {/* Recent incidents list (filtered) */}
-          <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
-            <div className="flex items-center justify-between">
-              <div className="text-sm font-semibold text-slate-100">Recent incidents</div>
-              <div className="text-[11px] text-slate-400">Top 10 (filtered)</div>
-            </div>
-
-            {filteredIncidents.length === 0 ? (
-              <div className="mt-3 text-xs text-slate-300">
-                No incidents match the active filters. Try “All” categories or expand the time window.
-              </div>
-            ) : (
-              <div className="mt-3 space-y-2">
-                {filteredIncidents.slice(0, 10).map((i) => (
-                  <Link
-                    key={i.id}
-                    href={`/incidents/${i.id}?departmentId=${dept.id}`}
-                    className="block rounded-md border border-slate-800 bg-slate-950/30 p-3 hover:border-orange-400"
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <div className="text-xs font-semibold text-slate-100">
-                            {i.neris_incident_id ? i.neris_incident_id : `Incident #${i.id}`}
-                          </div>
-                          <CategoryPill incident={i} />
-                        </div>
-                        <div className="mt-1 truncate text-[11px] text-slate-400">{joinLocation(i)}</div>
-                      </div>
-                      <div className="text-right text-[11px]">
-                        <DateBlock iso={getIncidentTimestampIso(i)} />
-                      </div>
-                    </div>
-                  </Link>
-                ))}
-              </div>
-            )}
           </div>
         </>
       )}
