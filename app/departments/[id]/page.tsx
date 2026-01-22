@@ -54,7 +54,6 @@ type HotspotCluster = {
 
 type TimeRangeKey = "all" | "30" | "90" | "365";
 type MapMode = "pins" | "hotspots";
-
 type TypeFilterKey = "all" | IncidentCategoryKey;
 
 function getApiBase() {
@@ -210,7 +209,7 @@ function CategoryPill({ incident }: { incident: ApiIncident }) {
 }
 
 // ----------------------
-// Time filter UI
+// Time + Type filter UI
 // ----------------------
 
 function timeRangeLabel(key: TimeRangeKey) {
@@ -268,10 +267,6 @@ function TimeFilterChips({
   );
 }
 
-// ----------------------
-// Type filter UI (Step 3)
-// ----------------------
-
 function typeFilterLabel(key: TypeFilterKey) {
   if (key === "all") return "All categories";
   return categoryMeta(key).label;
@@ -300,6 +295,8 @@ function TypeFilterChips({
               ? cn(categoryMeta(k).pill, "border-orange-400/30")
               : "border-slate-800 bg-slate-950/30 text-slate-300 hover:border-orange-400/40 hover:text-orange-200";
 
+        const label = k === "all" ? "All" : categoryMeta(k).label.split(" ")[0];
+
         return (
           <button
             key={k}
@@ -309,7 +306,7 @@ function TypeFilterChips({
             aria-pressed={active}
             title={typeFilterLabel(k)}
           >
-            {k === "all" ? "All" : categoryMeta(k).label.split(" ")[0]}
+            {label}
           </button>
         );
       })}
@@ -719,6 +716,10 @@ function HotspotLeafletMap({
   return <div ref={mapDivRef} className="h-80 w-full" aria-label="Interactive hotspot map" />;
 }
 
+// ----------------------
+// Page
+// ----------------------
+
 export default function DepartmentDetailPage() {
   const params = useParams<{ id: string }>();
   const idStr = params?.id;
@@ -732,10 +733,9 @@ export default function DepartmentDetailPage() {
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // #1 polish defaults: Hotspots + 90d + All
   const [timeRange, setTimeRange] = useState<TimeRangeKey>("90");
-  const [mapMode, setMapMode] = useState<MapMode>("pins");
-
-  // Step 3: type filter
+  const [mapMode, setMapMode] = useState<MapMode>("hotspots");
   const [typeFilter, setTypeFilter] = useState<TypeFilterKey>("all");
 
   const [deptCenter, setDeptCenter] = useState<GeoPoint | null>(null);
@@ -744,6 +744,12 @@ export default function DepartmentDetailPage() {
   const [mapNote, setMapNote] = useState<string | null>(null);
 
   const isValidId = useMemo(() => Number.isFinite(deptId) && deptId > 0, [deptId]);
+
+  function resetFilters() {
+    setTimeRange("90");
+    setTypeFilter("all");
+    setMapMode("hotspots");
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -817,7 +823,23 @@ export default function DepartmentDetailPage() {
     };
   }, [apiBase, deptId, idStr, isValidId]);
 
-  // Filter incidents by time range first
+  // Category-only set (for 30 vs 90 trend, independent of selected timeRange)
+  const categoryFilteredAllTime = useMemo(() => {
+    if (typeFilter === "all") return incidents;
+    return incidents.filter((i) => classifyIncident(i) === typeFilter);
+  }, [incidents, typeFilter]);
+
+  const count30 = useMemo(() => {
+    const now = Date.now();
+    return categoryFilteredAllTime.filter((i) => isWithinLastNDays(i, 30, now)).length;
+  }, [categoryFilteredAllTime]);
+
+  const count90 = useMemo(() => {
+    const now = Date.now();
+    return categoryFilteredAllTime.filter((i) => isWithinLastNDays(i, 90, now)).length;
+  }, [categoryFilteredAllTime]);
+
+  // Time filter first
   const timeFilteredIncidents = useMemo(() => {
     const days = timeRangeDays(timeRange);
     if (!days) return incidents;
@@ -825,12 +847,13 @@ export default function DepartmentDetailPage() {
     return incidents.filter((i) => isWithinLastNDays(i, days, nowMs));
   }, [incidents, timeRange]);
 
-  // Then apply type filter
+  // Then type filter
   const filteredIncidents = useMemo(() => {
     if (typeFilter === "all") return timeFilteredIncidents;
     return timeFilteredIncidents.filter((i) => classifyIncident(i) === typeFilter);
   }, [timeFilteredIncidents, typeFilter]);
 
+  // Geocode pins from filtered incidents
   useEffect(() => {
     if (!dept) return;
 
@@ -870,17 +893,17 @@ export default function DepartmentDetailPage() {
             });
           }
 
+          // Nominatim is rate-limited: this is demo-safe pacing
           await sleep(350);
         }
 
         if (!cancelled) {
           setPins(builtPins);
-          const filterText =
-            typeFilter === "all" ? "All categories" : categoryMeta(typeFilter).label;
+          const filterText = typeFilter === "all" ? "All categories" : categoryMeta(typeFilter).label;
 
           setMapNote(
             builtPins.length > 0
-              ? `Showing ${builtPins.length} mappable incident(s) • ${timeRangeLabel(timeRange)} • ${filterText}`
+              ? `Showing ${builtPins.length} mapped incident(s) • ${timeRangeLabel(timeRange)} • ${filterText}`
               : `No mappable incident addresses found (or geocode limits) • ${timeRangeLabel(timeRange)} • ${filterText}`
           );
         }
@@ -897,6 +920,8 @@ export default function DepartmentDetailPage() {
   }, [dept, filteredIncidents, timeRange, typeFilter]);
 
   const clusters = useMemo(() => computeClusters(pins, 250), [pins]);
+
+  const topCluster = clusters[0] ?? null;
 
   const totalIncidents = incidents.length;
   const showingIncidents = filteredIncidents.length;
@@ -969,7 +994,11 @@ export default function DepartmentDetailPage() {
 
                 <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
                   <div className="text-[10px] uppercase tracking-wide text-slate-400">Most recent (filtered)</div>
-                  {mostRecent ? <DateBlock iso={getIncidentTimestampIso(mostRecent)} /> : <div className="text-slate-300">—</div>}
+                  {mostRecent ? (
+                    <DateBlock iso={getIncidentTimestampIso(mostRecent)} />
+                  ) : (
+                    <div className="text-slate-300">—</div>
+                  )}
                 </div>
 
                 <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
@@ -989,17 +1018,27 @@ export default function DepartmentDetailPage() {
             </div>
           </div>
 
+          {/* Map + Controls */}
           <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <div className="text-sm font-semibold text-slate-100">NERIS Hotspot Intelligence Map</div>
                 <div className="mt-1 text-[11px] text-slate-400">
-                  Toggle between pins and hotspots. Filters update map + lists instantly.
+                  Hotspots indicate <span className="text-slate-200">density patterns</span> for triage and resource
+                  planning — not cause, origin, responsibility, or conclusions (NFPA-aligned discipline).
                 </div>
               </div>
 
               <div className="flex items-center gap-2">
                 <MapModeToggle value={mapMode} onChange={setMapMode} />
+                <button
+                  type="button"
+                  className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100 hover:border-orange-400"
+                  onClick={resetFilters}
+                  title="Reset to investor-default view"
+                >
+                  Reset filters
+                </button>
                 {deptMapLink ? (
                   <a
                     className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100 hover:border-orange-400"
@@ -1013,7 +1052,6 @@ export default function DepartmentDetailPage() {
               </div>
             </div>
 
-            {/* Filters row */}
             <div className="mt-3 rounded-md border border-slate-800 bg-slate-950/20 p-3 space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
@@ -1032,6 +1070,64 @@ export default function DepartmentDetailPage() {
                   <div className="mt-1 text-[11px] text-slate-300">Active: {activeFiltersText}</div>
                 </div>
                 <TypeFilterChips value={typeFilter} onChange={setTypeFilter} />
+              </div>
+            </div>
+
+            {/* Insights Panel (#2) */}
+            <div className="mt-3 rounded-md border border-slate-800 bg-slate-950/20 p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-[10px] uppercase tracking-wide text-slate-400">Hotspot insights</div>
+                  <div className="mt-1 text-[11px] text-slate-300">
+                    Snapshot for <span className="text-slate-100">{typeFilterLabel(typeFilter)}</span>
+                  </div>
+                </div>
+                <div className="text-[11px] text-slate-500">
+                  Mapped subset: <span className="text-slate-200">{pins.length}</span> pin(s)
+                </div>
+              </div>
+
+              <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
+                  <div className="text-[10px] uppercase tracking-wide text-slate-400">Volume (current filters)</div>
+                  <div className="mt-1 text-xl font-semibold text-slate-100">{showingIncidents}</div>
+                  <div className="text-[11px] text-slate-400">{activeFiltersText}</div>
+                </div>
+
+                <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
+                  <div className="text-[10px] uppercase tracking-wide text-slate-400">Trend (30 vs 90)</div>
+                  <div className="mt-1 flex items-baseline gap-2">
+                    <div className="text-xl font-semibold text-slate-100">{count30}</div>
+                    <div className="text-[11px] text-slate-400">in 30d</div>
+                  </div>
+                  <div className="mt-1 flex items-baseline gap-2">
+                    <div className="text-lg font-semibold text-slate-200">{count90}</div>
+                    <div className="text-[11px] text-slate-400">in 90d</div>
+                  </div>
+                  <div className="mt-1 text-[11px] text-slate-500">
+                    Category-aware snapshot, independent of selected time window.
+                  </div>
+                </div>
+
+                <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
+                  <div className="text-[10px] uppercase tracking-wide text-slate-400">Top hotspot (mapped)</div>
+                  {topCluster ? (
+                    <>
+                      <div className="mt-1 text-xl font-semibold text-slate-100">{topCluster.count}</div>
+                      <div className="mt-1 text-[11px] text-slate-400">
+                        Dominant:{" "}
+                        <span className="text-slate-200">{categoryMeta(topCluster.dominantCategory).label}</span>
+                      </div>
+                      <div className="mt-2 text-[11px] text-slate-500">
+                        Hotspots are density indicators for planning—not conclusions.
+                      </div>
+                    </>
+                  ) : (
+                    <div className="mt-2 text-[11px] text-slate-400">
+                      No clusters yet (try All categories or expand the time window).
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
 
