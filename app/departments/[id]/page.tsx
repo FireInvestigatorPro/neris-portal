@@ -635,6 +635,8 @@ function HotspotLeafletMap({
         });
 
         const label = L.marker([c.center.lat, c.center.lon], {
+          interactive: true,
+          keyboard: false,
           icon: L.divIcon({
             className: "",
             html: `
@@ -648,6 +650,7 @@ function HotspotLeafletMap({
                 font-weight: 800;
                 font-size: 12px;
                 box-shadow: 0 6px 20px rgba(0,0,0,0.35);
+                cursor: pointer;
               ">${c.count}</div>
             `,
             iconSize: [28, 28],
@@ -665,12 +668,16 @@ function HotspotLeafletMap({
           </div>
         `);
 
-        circle.on("click", () => {
+        const handleClusterClick = () => {
           onHotspotClick(c);
           try {
             map.setView([c.center.lat, c.center.lon], Math.max(map.getZoom(), 14), { animate: true });
           } catch {}
-        });
+        };
+
+        // ✅ IMPORTANT: bind click to BOTH the circle and the count badge marker
+        circle.on("click", handleClusterClick);
+        label.on("click", handleClusterClick);
 
         circle.addTo(layer);
         label.addTo(layer);
@@ -721,7 +728,6 @@ export default function DepartmentDetailPage() {
   const [mapLoading, setMapLoading] = useState(false);
   const [mapNote, setMapNote] = useState<string | null>(null);
 
-  // NEW: selected cluster drilldown
   const [selectedCluster, setSelectedCluster] = useState<HotspotCluster | null>(null);
 
   const isValidId = useMemo(() => Number.isFinite(deptId) && deptId > 0, [deptId]);
@@ -789,7 +795,7 @@ export default function DepartmentDetailPage() {
         const items = Array.isArray((incJson as any)?.items) ? (incJson as any).items : incJson;
 
         const list: ApiIncident[] = Array.isArray(items) ? items : [];
-        if (!cancelled) setIncidents(list.slice().sort(byMostRecent));
+        if (!cancelled) setIncidents(list.slice().sort((a, b) => byMostRecent(a, b)));
       } catch (e: any) {
         if (!cancelled) setError(e?.message ?? "Failed to load department.");
       } finally {
@@ -901,7 +907,6 @@ export default function DepartmentDetailPage() {
   const clusters = useMemo(() => computeClusters(pins, 250), [pins]);
   const topCluster = clusters[0] ?? null;
 
-  // If filters change and selected cluster no longer exists, clear it
   useEffect(() => {
     if (!selectedCluster) return;
     const stillExists = clusters.some((c) => c.id === selectedCluster.id);
@@ -910,17 +915,12 @@ export default function DepartmentDetailPage() {
 
   const totalIncidents = incidents.length;
   const showingIncidents = filteredIncidents.length;
-  const mostRecent = filteredIncidents[0] ?? timeFilteredIncidents[0] ?? incidents[0] ?? null;
-
-  const deptQueryForLink = dept ? buildDeptQuery(dept) : "";
-  const deptMapLink = deptQueryForLink ? osmSearchUrl(deptQueryForLink) : null;
 
   const activeFiltersText =
     `${timeRangeLabel(timeRange)} • ` + (typeFilter === "all" ? "All categories" : categoryMeta(typeFilter).label);
 
   const drilldownPins = useMemo(() => {
     if (!selectedCluster) return [];
-    // Sort by most recent timestamp descending (best for demo)
     return selectedCluster.pins
       .slice()
       .sort((a, b) => {
@@ -931,8 +931,12 @@ export default function DepartmentDetailPage() {
       .slice(0, 12);
   }, [selectedCluster]);
 
+  const deptQueryForLink = dept ? buildDeptQuery(dept) : "";
+  const deptMapLink = deptQueryForLink ? osmSearchUrl(deptQueryForLink) : null;
+
   return (
     <section className="space-y-4">
+      {/* header */}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold text-orange-400">Department</h1>
@@ -968,50 +972,44 @@ export default function DepartmentDetailPage() {
       {!loading && dept && (
         <>
           <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-4">
-            <div className="flex flex-col gap-2">
-              <div className="text-lg font-semibold text-slate-100">{dept.name}</div>
+            <div className="text-lg font-semibold text-slate-100">{dept.name}</div>
+            <div className="mt-1 text-xs text-slate-300">
+              {[dept.city, dept.state].filter(Boolean).join(", ") || "—"}{" "}
+              {dept.neris_department_id ? (
+                <>
+                  · <span className="text-slate-400">NERIS ID:</span>{" "}
+                  <span className="text-slate-100">{dept.neris_department_id}</span>
+                </>
+              ) : null}
+            </div>
 
-              <div className="text-xs text-slate-300">
-                {[dept.city, dept.state].filter(Boolean).join(", ") || "—"}{" "}
-                {dept.neris_department_id ? (
-                  <>
-                    · <span className="text-slate-400">NERIS ID:</span>{" "}
-                    <span className="text-slate-100">{dept.neris_department_id}</span>
-                  </>
-                ) : null}
-              </div>
-
-              <div className="mt-3 grid gap-3 sm:grid-cols-3">
-                <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
-                  <div className="text-[10px] uppercase tracking-wide text-slate-400">Total incidents</div>
-                  <div className="text-xl font-semibold text-slate-100">{totalIncidents}</div>
-                  <div className="text-[11px] text-slate-400">
-                    Showing <span className="text-slate-200">{showingIncidents}</span> • {activeFiltersText}
-                  </div>
+            <div className="mt-3 grid gap-3 sm:grid-cols-3">
+              <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
+                <div className="text-[10px] uppercase tracking-wide text-slate-400">Total incidents</div>
+                <div className="text-xl font-semibold text-slate-100">{totalIncidents}</div>
+                <div className="text-[11px] text-slate-400">
+                  Showing <span className="text-slate-200">{showingIncidents}</span> • {activeFiltersText}
                 </div>
-
-                <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
-                  <div className="text-[10px] uppercase tracking-wide text-slate-400">Most recent (filtered)</div>
-                  {mostRecent ? (
-                    <DateBlock iso={getIncidentTimestampIso(mostRecent)} />
+              </div>
+              <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
+                <div className="text-[10px] uppercase tracking-wide text-slate-400">Trend (30 vs 90)</div>
+                <div className="mt-1 text-[11px] text-slate-300">
+                  <span className="text-slate-100 font-semibold">{count30}</span> in 30d ·{" "}
+                  <span className="text-slate-100 font-semibold">{count90}</span> in 90d
+                </div>
+              </div>
+              <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
+                <div className="text-[10px] uppercase tracking-wide text-slate-400">Top hotspot (mapped)</div>
+                <div className="mt-1 text-[11px] text-slate-300">
+                  {topCluster ? (
+                    <>
+                      <span className="text-slate-100 font-semibold">{topCluster.count}</span> incidents · Dominant{" "}
+                      <span className="text-slate-100">{categoryMeta(topCluster.dominantCategory).label}</span>
+                    </>
                   ) : (
-                    <div className="text-slate-300">—</div>
+                    "—"
                   )}
                 </div>
-
-                <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
-                  <div className="text-[10px] uppercase tracking-wide text-slate-400">Department updated</div>
-                  <DateBlock iso={dept.updated_at ?? null} />
-                </div>
-              </div>
-
-              <div className="mt-4 flex flex-wrap gap-2">
-                <Link
-                  href={`/incidents?departmentId=${dept.id}`}
-                  className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100 hover:border-orange-400"
-                >
-                  View all incidents →
-                </Link>
               </div>
             </div>
           </div>
@@ -1021,8 +1019,8 @@ export default function DepartmentDetailPage() {
               <div>
                 <div className="text-sm font-semibold text-slate-100">NERIS Hotspot Intelligence Map</div>
                 <div className="mt-1 text-[11px] text-slate-400">
-                  Hotspots indicate <span className="text-slate-200">density patterns</span> for triage and resource
-                  planning — not cause, origin, responsibility, or conclusions (NFPA-aligned discipline).
+                  Hotspots indicate <span className="text-slate-200">density patterns</span> for triage and planning —
+                  not cause/origin/conclusions (NFPA-aligned discipline).
                 </div>
               </div>
 
@@ -1038,7 +1036,6 @@ export default function DepartmentDetailPage() {
                   type="button"
                   className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100 hover:border-orange-400"
                   onClick={resetFilters}
-                  title="Reset to investor-default view"
                 >
                   Reset filters
                 </button>
@@ -1076,64 +1073,6 @@ export default function DepartmentDetailPage() {
               </div>
             </div>
 
-            {/* Insights */}
-            <div className="mt-3 rounded-md border border-slate-800 bg-slate-950/20 p-3">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <div className="text-[10px] uppercase tracking-wide text-slate-400">Hotspot insights</div>
-                  <div className="mt-1 text-[11px] text-slate-300">
-                    Snapshot for <span className="text-slate-100">{typeFilterLabel(typeFilter)}</span>
-                  </div>
-                </div>
-                <div className="text-[11px] text-slate-500">
-                  Mapped subset: <span className="text-slate-200">{pins.length}</span> pin(s)
-                </div>
-              </div>
-
-              <div className="mt-3 grid gap-3 sm:grid-cols-3">
-                <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
-                  <div className="text-[10px] uppercase tracking-wide text-slate-400">Volume (current filters)</div>
-                  <div className="mt-1 text-xl font-semibold text-slate-100">{showingIncidents}</div>
-                  <div className="text-[11px] text-slate-400">{activeFiltersText}</div>
-                </div>
-
-                <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
-                  <div className="text-[10px] uppercase tracking-wide text-slate-400">Trend (30 vs 90)</div>
-                  <div className="mt-1 flex items-baseline gap-2">
-                    <div className="text-xl font-semibold text-slate-100">{count30}</div>
-                    <div className="text-[11px] text-slate-400">in 30d</div>
-                  </div>
-                  <div className="mt-1 flex items-baseline gap-2">
-                    <div className="text-lg font-semibold text-slate-200">{count90}</div>
-                    <div className="text-[11px] text-slate-400">in 90d</div>
-                  </div>
-                  <div className="mt-1 text-[11px] text-slate-500">
-                    Category-aware snapshot, independent of selected time window.
-                  </div>
-                </div>
-
-                <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
-                  <div className="text-[10px] uppercase tracking-wide text-slate-400">Top hotspot (mapped)</div>
-                  {topCluster ? (
-                    <>
-                      <div className="mt-1 text-xl font-semibold text-slate-100">{topCluster.count}</div>
-                      <div className="mt-1 text-[11px] text-slate-400">
-                        Dominant:{" "}
-                        <span className="text-slate-200">{categoryMeta(topCluster.dominantCategory).label}</span>
-                      </div>
-                      <div className="mt-2 text-[11px] text-slate-500">
-                        Tip: click a hotspot circle to drill down.
-                      </div>
-                    </>
-                  ) : (
-                    <div className="mt-2 text-[11px] text-slate-400">
-                      No clusters yet (try All categories or expand the time window).
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-
             <div className="mt-3 overflow-hidden rounded-md border border-slate-800 bg-slate-950/30">
               <HotspotLeafletMap
                 center={deptCenter}
@@ -1150,11 +1089,10 @@ export default function DepartmentDetailPage() {
               <div className="text-[11px] text-slate-500">
                 {mapMode === "pins"
                   ? "Pins: click a dot to open an incident."
-                  : `Hotspots: ${clusters.length} cluster(s) from ${pins.length} pin(s).`}
+                  : `Hotspots: ${clusters.length} cluster(s) from ${pins.length} pin(s). Click the number badge to drill down.`}
               </div>
             </div>
 
-            {/* NEW: Hotspot Drilldown */}
             {mapMode === "hotspots" && selectedCluster ? (
               <div className="mt-3 rounded-md border border-slate-800 bg-slate-950/20 p-3">
                 <div className="flex items-start justify-between gap-3">
@@ -1164,9 +1102,6 @@ export default function DepartmentDetailPage() {
                       <span className="text-slate-100 font-semibold">{selectedCluster.count}</span> incident(s) in this
                       cluster • Dominant:{" "}
                       <span className="text-slate-100">{categoryMeta(selectedCluster.dominantCategory).label}</span>
-                    </div>
-                    <div className="mt-1 text-[11px] text-slate-500">
-                      Drilldown supports triage/workflow; it does not imply cause or conclusions.
                     </div>
                   </div>
 
@@ -1202,16 +1137,9 @@ export default function DepartmentDetailPage() {
                     </Link>
                   ))}
                 </div>
-
-                {selectedCluster.count > drilldownPins.length ? (
-                  <div className="mt-2 text-[11px] text-slate-500">
-                    Showing {drilldownPins.length} of {selectedCluster.count} incidents in this cluster.
-                  </div>
-                ) : null}
               </div>
             ) : null}
 
-            {/* Pins list */}
             <div className="mt-3 grid gap-2 sm:grid-cols-2">
               {pins.length === 0 ? (
                 <div className="text-xs text-slate-300">No pinned incidents match the active filters.</div>
