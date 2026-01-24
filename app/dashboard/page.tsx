@@ -92,6 +92,15 @@ export default async function DashboardPage({
       ? departments.find((d) => d.id === departmentId) ?? departments[0]
       : departments[0];
 
+  // ✅ derive selected dept id once
+  const selectedDeptId = selected?.id ? String(selected.id) : null;
+
+  // ✅ build context-aware routes
+  const manageDepartmentsHref = selectedDeptId ? `/departments/${selectedDeptId}` : "/departments";
+  const viewAllIncidentsHref = selectedDeptId
+    ? `/incidents?departmentId=${selectedDeptId}`
+    : "/incidents";
+
   // Incidents for selected dept
   let incidents: Incident[] = [];
   let incidentsError: string | null = null;
@@ -112,14 +121,6 @@ export default async function DashboardPage({
       (a, b) =>
         (new Date(b.occurred_at).getTime() || 0) - (new Date(a.occurred_at).getTime() || 0)
     )[0];
-
-  // ✅ Context-preserving routes (fixes “View All Incidents opens Dudley”)
-  const selectedDeptId = selected?.id ? String(selected.id) : null;
-
-  const hrefDeptIntelligence = selectedDeptId ? `/departments/${selectedDeptId}` : "/departments";
-  const hrefIncidentsForDept = selectedDeptId
-    ? `/incidents?departmentId=${selectedDeptId}`
-    : "/incidents";
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-8">
@@ -167,20 +168,18 @@ export default async function DashboardPage({
           </div>
 
           <div className="flex flex-wrap gap-2">
-            {/* ✅ Go to the slick dept intelligence page when selected */}
+            {/* ✅ FIX: go straight to slick department intelligence */}
             <Link
-              href={hrefDeptIntelligence}
+              href={manageDepartmentsHref}
               className="rounded-xl border border-slate-700 bg-slate-950/40 px-4 py-2 text-sm hover:border-orange-500/60 hover:text-orange-300"
-              title={selectedDeptId ? "Open department intelligence view" : "Manage departments"}
             >
-              {selectedDeptId ? "View Department Intelligence" : "Manage Departments"}
+              View Department Intelligence
             </Link>
 
-            {/* ✅ Preserve dept context when routing to incidents */}
+            {/* ✅ FIX: preserve dept context */}
             <Link
-              href={hrefIncidentsForDept}
+              href={viewAllIncidentsHref}
               className="rounded-xl border border-slate-700 bg-slate-950/40 px-4 py-2 text-sm hover:border-orange-500/60 hover:text-orange-300"
-              title={selectedDeptId ? "View incidents for current department" : "View all incidents"}
             >
               View All Incidents
             </Link>
