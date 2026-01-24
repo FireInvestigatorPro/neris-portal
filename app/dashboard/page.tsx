@@ -113,6 +113,14 @@ export default async function DashboardPage({
         (new Date(b.occurred_at).getTime() || 0) - (new Date(a.occurred_at).getTime() || 0)
     )[0];
 
+  // ✅ Context-preserving routes (fixes “View All Incidents opens Dudley”)
+  const selectedDeptId = selected?.id ? String(selected.id) : null;
+
+  const hrefDeptIntelligence = selectedDeptId ? `/departments/${selectedDeptId}` : "/departments";
+  const hrefIncidentsForDept = selectedDeptId
+    ? `/incidents?departmentId=${selectedDeptId}`
+    : "/incidents";
+
   return (
     <div className="mx-auto max-w-5xl px-4 py-8">
       {/* Header */}
@@ -159,18 +167,24 @@ export default async function DashboardPage({
           </div>
 
           <div className="flex flex-wrap gap-2">
+            {/* ✅ Go to the slick dept intelligence page when selected */}
             <Link
-              href="/departments"
+              href={hrefDeptIntelligence}
               className="rounded-xl border border-slate-700 bg-slate-950/40 px-4 py-2 text-sm hover:border-orange-500/60 hover:text-orange-300"
+              title={selectedDeptId ? "Open department intelligence view" : "Manage departments"}
             >
-              Manage Departments
+              {selectedDeptId ? "View Department Intelligence" : "Manage Departments"}
             </Link>
+
+            {/* ✅ Preserve dept context when routing to incidents */}
             <Link
-              href="/incidents"
+              href={hrefIncidentsForDept}
               className="rounded-xl border border-slate-700 bg-slate-950/40 px-4 py-2 text-sm hover:border-orange-500/60 hover:text-orange-300"
+              title={selectedDeptId ? "View incidents for current department" : "View all incidents"}
             >
               View All Incidents
             </Link>
+
             {selected?.id ? (
               <Link
                 href={`/incidents/new?departmentId=${selected.id}`}
@@ -242,16 +256,15 @@ export default async function DashboardPage({
             {latestIncident ? fmtDate(latestIncident.occurred_at) : ""}
           </div>
           {latestIncident && selected?.id ? (
-  <div className="mt-3">
-    <Link
-      href={`/incidents/${latestIncident.id}?departmentId=${selected.id}`}
-      className="text-sm text-orange-300 hover:text-orange-200"
-    >
-      View incident →
-    </Link>
-  </div>
-) : null}
-
+            <div className="mt-3">
+              <Link
+                href={`/incidents/${latestIncident.id}?departmentId=${selected.id}`}
+                className="text-sm text-orange-300 hover:text-orange-200"
+              >
+                View incident →
+              </Link>
+            </div>
+          ) : null}
         </div>
       </div>
 
