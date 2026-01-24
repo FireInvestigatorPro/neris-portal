@@ -1,4 +1,3 @@
-// app/layout.tsx
 import type { Metadata } from "next";
 import Link from "next/link";
 import "./globals.css";
@@ -13,23 +12,30 @@ function deptHrefFromId(id?: string | null) {
   return id ? `/departments/${id}` : "/departments";
 }
 
+function incidentsHrefFromId(id?: string | null) {
+  return id ? `/incidents?departmentId=${id}` : "/incidents";
+}
+
 export default async function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   // Next 16: cookies() is async
   const cookieStore = await cookies();
 
-  // Try a few reasonable cookie names (use whichever you already set elsewhere)
+  // Use any existing cookie you already set elsewhere
   const selectedDeptId =
     cookieStore.get("neris_selected_department_id")?.value ??
     cookieStore.get("selected_department_id")?.value ??
     cookieStore.get("department_id")?.value ??
     null;
 
-  // Optional: allow a demo fallback (set in Vercel env if you want)
+  // Optional demo fallback
   const demoDeptId = process.env.DEMO_DEPARTMENT_ID ?? null;
 
-  const departmentsHref = deptHrefFromId(selectedDeptId ?? demoDeptId);
+  const activeDeptId = selectedDeptId ?? demoDeptId;
+
+  const departmentsHref = deptHrefFromId(activeDeptId);
+  const incidentsHref = incidentsHrefFromId(activeDeptId);
 
   return (
     <html lang="en">
@@ -58,11 +64,13 @@ export default async function RootLayout({
               <Link className="hover:text-orange-400" href="/dashboard">
                 Dashboard
               </Link>
-              <Link className="hover:text-orange-400" href="/incidents">
+
+              {/* ✅ FIXED: preserve department context */}
+              <Link className="hover:text-orange-400" href={incidentsHref}>
                 Incidents
               </Link>
 
-              {/* ✅ This is the fix: Departments goes to the “current” dept detail when known */}
+              {/* ✅ Already correct, now consistent */}
               <Link className="hover:text-orange-400" href={departmentsHref}>
                 Departments
               </Link>
