@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 
 type Department = {
   id: number;
@@ -23,9 +24,21 @@ type Incident = {
   updated_at?: string;
 };
 
+function parseDeptId(raw: string | null): number | null {
+  if (!raw) return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n;
+}
+
 export default function IncidentsPage() {
+  const searchParams = useSearchParams();
+
+  // ✅ Pull departmentId from URL if present
+  const deptIdFromUrl = parseDeptId(searchParams.get("departmentId"));
+
   const [departments, setDepartments] = useState<Department[]>([]);
-  const [departmentId, setDepartmentId] = useState<number | null>(null);
+  const [departmentId, setDepartmentId] = useState<number | null>(deptIdFromUrl);
 
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [loading, setLoading] = useState(true);
@@ -35,6 +48,14 @@ export default function IncidentsPage() {
     () => departments.find((d) => d.id === departmentId) ?? null,
     [departments, departmentId]
   );
+
+  // ✅ If someone navigates here with a different departmentId later (e.g., header),
+  // update the selection without forcing a default.
+  useEffect(() => {
+    const next = parseDeptId(searchParams.get("departmentId"));
+    if (next && next !== departmentId) setDepartmentId(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   useEffect(() => {
     let cancelled = false;
@@ -48,9 +69,15 @@ export default function IncidentsPage() {
         if (cancelled) return;
         setDepartments(data);
 
-        // default to first dept if none selected
+        // ✅ Only default to first dept if none selected (and no URL deptId)
         if (data.length && departmentId === null) {
           setDepartmentId(data[0].id);
+        }
+
+        // ✅ If URL deptId exists but isn't in the returned list, fall back cleanly
+        if (data.length && departmentId !== null) {
+          const exists = data.some((d) => d.id === departmentId);
+          if (!exists) setDepartmentId(data[0].id);
         }
       } catch (e: any) {
         if (cancelled) return;
@@ -116,7 +143,10 @@ export default function IncidentsPage() {
           <select
             className="rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
             value={departmentId ?? ""}
-            onChange={(e) => setDepartmentId(Number(e.target.value))}
+            onChange={(e) => {
+              const next = Number(e.target.value);
+              setDepartmentId(Number.isFinite(next) ? next : null);
+            }}
           >
             {departments.map((d) => (
               <option key={d.id} value={d.id}>
