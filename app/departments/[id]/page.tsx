@@ -4,6 +4,16 @@ import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 
+/**
+ * Department Hotspot Intelligence page
+ * - Interactive Leaflet OSM map (pins + hotspot circles)
+ * - Hotspot drilldown panel
+ * - Print/PDF "Hotspot Brief" export
+ * - Top Hotspots ranked list (Option 2)
+ *
+ * NOTE: Demo-safe only. No backend writes.
+ */
+
 type Department = {
   id: number;
   name: string;
@@ -109,10 +119,6 @@ function DateBlock({ iso }: { iso?: string | null }) {
       <div className="text-[10px] text-slate-400">{utc}</div>
     </div>
   );
-}
-
-function joinLocation(i: ApiIncident) {
-  return [i.address, i.city, i.state].filter(Boolean).join(", ") || "—";
 }
 
 function asNumber(v: unknown): number | null {
@@ -460,8 +466,13 @@ function computeClusters(pins: IncidentPin[], thresholdMeters: number): HotspotC
   return clusters.sort((a, b) => b.count - a.count);
 }
 
+/**
+ * Map with optional external "focus center" (for Top Hotspots Select)
+ * This avoids refactoring: we just accept a point and setView when it changes.
+ */
 function HotspotLeafletMap({
   center,
+  focusCenter,
   pins,
   clusters,
   departmentId,
@@ -469,6 +480,7 @@ function HotspotLeafletMap({
   onHotspotClick,
 }: {
   center: GeoPoint | null;
+  focusCenter: GeoPoint | null;
   pins: IncidentPin[];
   clusters: HotspotCluster[];
   departmentId: number;
@@ -577,10 +589,13 @@ function HotspotLeafletMap({
     if (!leafletReady) return;
     const map = mapRef.current;
     if (!map) return;
-    if (!center) return;
 
-    map.setView([center.lat, center.lon], 12, { animate: true });
-  }, [leafletReady, center]);
+    // Prefer focusing on a selected hotspot center if provided
+    const target = focusCenter ?? center;
+    if (!target) return;
+
+    map.setView([target.lat, target.lon], Math.max(map.getZoom(), focusCenter ? 14 : 12), { animate: true });
+  }, [leafletReady, center, focusCenter]);
 
   useEffect(() => {
     if (!leafletReady) return;
@@ -685,14 +700,17 @@ function HotspotLeafletMap({
       }
     }
 
-    if (bounds.length >= 2) {
-      try {
-        map.fitBounds(bounds, { padding: [20, 20] });
-      } catch {}
-    } else if (bounds.length === 1) {
-      map.setView(bounds[0], mode === "pins" ? 14 : 13, { animate: true });
+    // Keep fitBounds behavior for initial render only-ish: if no focusCenter set.
+    if (!focusCenter) {
+      if (bounds.length >= 2) {
+        try {
+          map.fitBounds(bounds, { padding: [20, 20] });
+        } catch {}
+      } else if (bounds.length === 1) {
+        map.setView(bounds[0], mode === "pins" ? 14 : 13, { animate: true });
+      }
     }
-  }, [leafletReady, pins, clusters, departmentId, mode, onHotspotClick]);
+  }, [leafletReady, pins, clusters, departmentId, mode, onHotspotClick, focusCenter]);
 
   if (leafletError) {
     return <div className="p-4 text-xs text-red-200">Map failed to load: {leafletError}</div>;
@@ -728,6 +746,10 @@ export default function DepartmentDetailPage() {
   const [mapNote, setMapNote] = useState<string | null>(null);
 
   const [selectedCluster, setSelectedCluster] = useState<HotspotCluster | null>(null);
+
+  // NEW: used by Top Hotspots list to push map focus without refactor
+  const [focusCenter, setFocusCenter] = useState<GeoPoint | null>(null);
+
   const [generatedAt, setGeneratedAt] = useState<string>(() => new Date().toISOString());
 
   const isValidId = useMemo(() => Number.isFinite(deptId) && deptId > 0, [deptId]);
@@ -737,18 +759,15 @@ export default function DepartmentDetailPage() {
     setTypeFilter("all");
     setMapMode("hotspots");
     setSelectedCluster(null);
+    setFocusCenter(null);
   }
 
   function exportBrief() {
-    // Update timestamp so the PDF shows the moment you exported it
     setGeneratedAt(new Date().toISOString());
-    // Let state flush to DOM before print
     setTimeout(() => {
       try {
         window.print();
-      } catch {
-        // no-op
-      }
+      } catch {}
     }, 50);
   }
 
@@ -766,6 +785,7 @@ export default function DepartmentDetailPage() {
       setPins([]);
       setMapNote(null);
       setSelectedCluster(null);
+      setFocusCenter(null);
 
       if (!isValidId) {
         setError(`Invalid department id: "${idStr}"`);
@@ -866,6 +886,7 @@ export default function DepartmentDetailPage() {
       setMapLoading(true);
       setMapNote("Geocoding map points…");
       setSelectedCluster(null);
+      setFocusCenter(null);
 
       try {
         if (deptQuery) {
@@ -892,7 +913,6 @@ export default function DepartmentDetailPage() {
             });
           }
 
-          // demo-safe pacing for Nominatim
           await sleep(350);
         }
 
@@ -924,7 +944,10 @@ export default function DepartmentDetailPage() {
   useEffect(() => {
     if (!selectedCluster) return;
     const stillExists = clusters.some((c) => c.id === selectedCluster.id);
-    if (!stillExists) setSelectedCluster(null);
+    if (!stillExists) {
+      setSelectedCluster(null);
+      setFocusCenter(null);
+    }
   }, [clusters, selectedCluster]);
 
   const totalIncidents = incidents.length;
@@ -952,17 +975,25 @@ export default function DepartmentDetailPage() {
 
   const topHotspots = useMemo(() => clusters.slice(0, 3), [clusters]);
 
+  function selectHotspot(c: HotspotCluster) {
+    setMapMode("hotspots");
+    setSelectedCluster(c);
+    setFocusCenter(c.center);
+    // UX: if you had the page scrolled down, this re-centers your attention on map.
+    try {
+      document.getElementById("hotspot-map-anchor")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    } catch {}
+  }
+
   return (
     <section className="space-y-4">
-      {/* Print styles + print-only brief */}
+      {/* Print styles + print-only brief (unchanged from Option 1) */}
       <style>{`
         .print-only { display: none; }
         @media print {
-          /* Hide app chrome / interactive UI on print */
           .no-print { display: none !important; }
           .print-only { display: block !important; }
 
-          /* Make print background clean */
           html, body {
             background: #ffffff !important;
             color: #0f172a !important;
@@ -970,10 +1001,8 @@ export default function DepartmentDetailPage() {
             print-color-adjust: exact;
           }
 
-          /* Prevent awkward cut-offs */
           .print-avoid-break { break-inside: avoid; page-break-inside: avoid; }
 
-          /* Tighter page layout */
           .print-page {
             padding: 24px;
             font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
@@ -1050,9 +1079,7 @@ export default function DepartmentDetailPage() {
                 <strong>{topCluster.count}</strong> incident(s) • Dominant category:{" "}
                 <strong>{categoryMeta(topCluster.dominantCategory).label}</strong>
               </div>
-              <div className="print-note">
-                Hotspot location is approximate and based on geocoded preview pins.
-              </div>
+              <div className="print-note">Hotspot location is approximate and based on geocoded preview pins.</div>
             </>
           ) : (
             <div className="print-note">No hotspots computed for current mapped subset.</div>
@@ -1097,17 +1124,12 @@ export default function DepartmentDetailPage() {
             </>
           ) : (
             <>
-              <div className="print-note">
-                No hotspot selected. Tip: select a hotspot on the map to include drilldown details.
-              </div>
+              <div className="print-note">No hotspot selected. Tip: select a hotspot to include drilldown details.</div>
               {topHotspots.length > 0 ? (
                 <div className="print-note">
                   Top hotspots (mapped):{" "}
                   {topHotspots
-                    .map(
-                      (h) =>
-                        `${h.count} (${categoryMeta(h.dominantCategory).label})`
-                    )
+                    .map((h) => `${h.count} (${categoryMeta(h.dominantCategory).label})`)
                     .join(" • ")}
                 </div>
               ) : null}
@@ -1216,7 +1238,10 @@ export default function DepartmentDetailPage() {
                   value={mapMode}
                   onChange={(v) => {
                     setMapMode(v);
-                    if (v === "pins") setSelectedCluster(null);
+                    if (v === "pins") {
+                      setSelectedCluster(null);
+                      setFocusCenter(null);
+                    }
                   }}
                 />
               </div>
@@ -1242,14 +1267,21 @@ export default function DepartmentDetailPage() {
                 </div>
               </div>
 
+              {/* anchor used by Top Hotspots Select */}
+              <div id="hotspot-map-anchor" />
+
               <div className="mt-3 overflow-hidden rounded-md border border-slate-800 bg-slate-950/30">
                 <HotspotLeafletMap
                   center={deptCenter}
+                  focusCenter={focusCenter}
                   pins={pins}
                   clusters={clusters}
                   departmentId={dept.id}
                   mode={mapMode}
-                  onHotspotClick={(c) => setSelectedCluster(c)}
+                  onHotspotClick={(c) => {
+                    setSelectedCluster(c);
+                    setFocusCenter(c.center);
+                  }}
                 />
               </div>
 
@@ -1258,9 +1290,88 @@ export default function DepartmentDetailPage() {
                 <div className="text-[11px] text-slate-500">
                   {mapMode === "pins"
                     ? "Pins: click a dot to open an incident."
-                    : `Hotspots: ${clusters.length} cluster(s) from ${pins.length} pin(s). Click the circle or number badge to drill down.`}
+                    : `Hotspots: ${clusters.length} cluster(s) from ${pins.length} pin(s). Click a circle/badge OR use Top Hotspots below.`}
                 </div>
               </div>
+
+              {/* ✅ Option 2: Top Hotspots ranked list */}
+              {mapMode === "hotspots" ? (
+                <div className="mt-3 rounded-md border border-slate-800 bg-slate-950/20 p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-[10px] uppercase tracking-wide text-slate-400">Top hotspots (mapped)</div>
+                      <div className="mt-1 text-[11px] text-slate-500">
+                        Ranked by incident count. Select to zoom + open drilldown.
+                      </div>
+                    </div>
+                    {selectedCluster ? (
+                      <button
+                        type="button"
+                        className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100 hover:border-orange-400"
+                        onClick={() => {
+                          setSelectedCluster(null);
+                          setFocusCenter(null);
+                        }}
+                        title="Clear selection"
+                      >
+                        Clear selection
+                      </button>
+                    ) : null}
+                  </div>
+
+                  {topHotspots.length === 0 ? (
+                    <div className="mt-2 text-xs text-slate-300">
+                      No hotspots computed yet (try All categories or expand the time window).
+                    </div>
+                  ) : (
+                    <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                      {topHotspots.map((h, idx) => {
+                        const selected = selectedCluster?.id === h.id;
+                        const meta = categoryMeta(h.dominantCategory);
+
+                        return (
+                          <button
+                            key={h.id}
+                            type="button"
+                            onClick={() => selectHotspot(h)}
+                            className={cn(
+                              "text-left rounded-md border p-3 transition",
+                              selected
+                                ? "border-orange-400/70 bg-orange-500/10"
+                                : "border-slate-800 bg-slate-950/30 hover:border-orange-400/40"
+                            )}
+                            title="Select hotspot"
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="text-xs font-semibold text-slate-100">
+                                #{idx + 1} Hotspot
+                              </div>
+                              <span
+                                className={cn(
+                                  "inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-[11px] font-semibold",
+                                  meta.pill
+                                )}
+                              >
+                                <span className={cn("h-2 w-2 rounded-full", meta.dot)} />
+                                {meta.label}
+                              </span>
+                            </div>
+
+                            <div className="mt-2 flex items-baseline gap-2">
+                              <div className="text-2xl font-extrabold text-slate-100">{h.count}</div>
+                              <div className="text-xs text-slate-400">incidents</div>
+                            </div>
+
+                            <div className="mt-2 text-[11px] text-slate-500">
+                              Click to open drilldown + zoom
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              ) : null}
 
               {mapMode === "hotspots" && selectedCluster ? (
                 <div className="mt-3 rounded-md border border-slate-800 bg-slate-950/20 p-3">
@@ -1277,7 +1388,10 @@ export default function DepartmentDetailPage() {
                     <button
                       type="button"
                       className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100 hover:border-orange-400"
-                      onClick={() => setSelectedCluster(null)}
+                      onClick={() => {
+                        setSelectedCluster(null);
+                        setFocusCenter(null);
+                      }}
                     >
                       Clear
                     </button>
