@@ -53,7 +53,6 @@ async function fetchJson<T>(
 export default async function DashboardPage({
   searchParams,
 }: {
-  // ✅ Next 16: searchParams is a Promise in server components
   searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
   await requireDemoAuth();
@@ -111,7 +110,6 @@ export default async function DashboardPage({
         (new Date(b.occurred_at).getTime() || 0) - (new Date(a.occurred_at).getTime() || 0)
     )[0];
 
-  // ✅ These are the two links that fix the Dudley fallback
   const viewDeptHref = selected?.id ? `/departments/${selected.id}` : "/departments";
   const viewIncidentsHref = selected?.id ? `/incidents?departmentId=${selected.id}` : "/incidents";
 
@@ -156,7 +154,6 @@ export default async function DashboardPage({
           </div>
 
           <div className="flex flex-wrap gap-2">
-            {/* ✅ FIX: go to slick dept detail */}
             <Link
               href={viewDeptHref}
               className="rounded-xl border border-slate-700 bg-slate-950/40 px-4 py-2 text-sm hover:border-orange-500/60 hover:text-orange-300"
@@ -164,7 +161,6 @@ export default async function DashboardPage({
               View Department Intelligence
             </Link>
 
-            {/* ✅ FIX: carry departmentId so it does NOT default to Dudley */}
             <Link
               href={viewIncidentsHref}
               className="rounded-xl border border-slate-700 bg-slate-950/40 px-4 py-2 text-sm hover:border-orange-500/60 hover:text-orange-300"
@@ -183,16 +179,25 @@ export default async function DashboardPage({
           </div>
         </div>
 
+        {/* ✅ Department switcher (NOW sets cookie via /api/active-department) */}
         {departments.length > 1 ? (
           <div className="mt-4 flex flex-wrap items-center gap-2">
             <div className="text-xs uppercase tracking-wide text-slate-400">Switch Department</div>
             <div className="flex flex-wrap gap-2">
               {departments.map((d) => {
                 const active = selected?.id === d.id;
+
+                // IMPORTANT:
+                // We hit the API route to set the cookie, then redirect back to the dashboard with query param.
+                const redirect = `/dashboard?departmentId=${d.id}`;
+                const setDeptHref = `/api/active-department?departmentId=${d.id}&redirect=${encodeURIComponent(
+                  redirect
+                )}`;
+
                 return (
                   <Link
                     key={d.id}
-                    href={{ pathname: "/dashboard", query: { departmentId: String(d.id) } }}
+                    href={setDeptHref}
                     className={cls(
                       "rounded-full border px-3 py-1 text-sm",
                       active
