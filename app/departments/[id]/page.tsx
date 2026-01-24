@@ -675,7 +675,6 @@ function HotspotLeafletMap({
           } catch {}
         };
 
-        // ✅ IMPORTANT: bind click to BOTH the circle and the count badge marker
         circle.on("click", handleClusterClick);
         label.on("click", handleClusterClick);
 
@@ -729,6 +728,7 @@ export default function DepartmentDetailPage() {
   const [mapNote, setMapNote] = useState<string | null>(null);
 
   const [selectedCluster, setSelectedCluster] = useState<HotspotCluster | null>(null);
+  const [generatedAt, setGeneratedAt] = useState<string>(() => new Date().toISOString());
 
   const isValidId = useMemo(() => Number.isFinite(deptId) && deptId > 0, [deptId]);
 
@@ -737,6 +737,19 @@ export default function DepartmentDetailPage() {
     setTypeFilter("all");
     setMapMode("hotspots");
     setSelectedCluster(null);
+  }
+
+  function exportBrief() {
+    // Update timestamp so the PDF shows the moment you exported it
+    setGeneratedAt(new Date().toISOString());
+    // Let state flush to DOM before print
+    setTimeout(() => {
+      try {
+        window.print();
+      } catch {
+        // no-op
+      }
+    }, 50);
   }
 
   useEffect(() => {
@@ -795,7 +808,7 @@ export default function DepartmentDetailPage() {
         const items = Array.isArray((incJson as any)?.items) ? (incJson as any).items : incJson;
 
         const list: ApiIncident[] = Array.isArray(items) ? items : [];
-        if (!cancelled) setIncidents(list.slice().sort((a, b) => byMostRecent(a, b)));
+        if (!cancelled) setIncidents(list.slice().sort(byMostRecent));
       } catch (e: any) {
         if (!cancelled) setError(e?.message ?? "Failed to load department.");
       } finally {
@@ -879,6 +892,7 @@ export default function DepartmentDetailPage() {
             });
           }
 
+          // demo-safe pacing for Nominatim
           await sleep(350);
         }
 
@@ -928,110 +942,245 @@ export default function DepartmentDetailPage() {
         const tb = new Date(b.occurredAt ?? 0).getTime();
         return tb - ta;
       })
-      .slice(0, 12);
+      .slice(0, 24);
   }, [selectedCluster]);
 
   const deptQueryForLink = dept ? buildDeptQuery(dept) : "";
   const deptMapLink = deptQueryForLink ? osmSearchUrl(deptQueryForLink) : null;
 
+  const generated = fmtLocalUtc(generatedAt);
+
+  const topHotspots = useMemo(() => clusters.slice(0, 3), [clusters]);
+
   return (
     <section className="space-y-4">
-      {/* header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold text-orange-400">Department</h1>
-          <p className="text-xs text-slate-300">
-            Dept ID: <span className="text-slate-100">{idStr}</span>
-          </p>
+      {/* Print styles + print-only brief */}
+      <style>{`
+        .print-only { display: none; }
+        @media print {
+          /* Hide app chrome / interactive UI on print */
+          .no-print { display: none !important; }
+          .print-only { display: block !important; }
+
+          /* Make print background clean */
+          html, body {
+            background: #ffffff !important;
+            color: #0f172a !important;
+            -webkit-print-color-adjust: exact;
+            print-color-adjust: exact;
+          }
+
+          /* Prevent awkward cut-offs */
+          .print-avoid-break { break-inside: avoid; page-break-inside: avoid; }
+
+          /* Tighter page layout */
+          .print-page {
+            padding: 24px;
+            font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+          }
+
+          .print-title { font-size: 18px; font-weight: 800; }
+          .print-subtitle { font-size: 12px; color: #334155; margin-top: 2px; }
+          .print-meta { font-size: 11px; color: #475569; margin-top: 8px; }
+
+          .print-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
+          .print-card { border: 1px solid #e2e8f0; border-radius: 10px; padding: 10px; }
+          .print-card h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: #64748b; margin: 0 0 6px 0; }
+          .print-value { font-size: 18px; font-weight: 800; color: #0f172a; }
+          .print-note { font-size: 11px; color: #334155; margin-top: 10px; }
+
+          .print-list { margin-top: 10px; }
+          .print-row { display: grid; grid-template-columns: 110px 1fr; gap: 10px; padding: 8px 0; border-top: 1px solid #f1f5f9; }
+          .print-row:first-child { border-top: 0; }
+          .print-k { font-size: 11px; color: #475569; }
+          .print-v { font-size: 12px; color: #0f172a; font-weight: 600; }
+
+          .print-footer { margin-top: 18px; padding-top: 10px; border-top: 1px solid #e2e8f0; font-size: 10px; color: #475569; }
+        }
+      `}</style>
+
+      <div className="print-only print-page">
+        <div className="print-title">InfernoIntelAI — NERIS Hotspot Brief</div>
+        <div className="print-subtitle">
+          {dept ? dept.name : "Department"} • {dept ? [dept.city, dept.state].filter(Boolean).join(", ") : ""}
+        </div>
+        <div className="print-meta">
+          Generated: <strong>{generated.local}</strong> • Filters: <strong>{activeFiltersText}</strong>
+          {dept?.neris_department_id ? (
+            <>
+              {" "}
+              • NERIS Dept ID: <strong>{dept.neris_department_id}</strong>
+            </>
+          ) : null}
         </div>
 
-        <Link
-          href="/departments"
-          className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100 hover:border-orange-400"
-        >
-          ← Back to Departments
-        </Link>
-      </div>
-
-      <div className="text-[11px] text-slate-500">
-        Backend: <span className="text-slate-300">{apiBase}</span>
-      </div>
-
-      {loading && (
-        <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-4">
-          <p className="text-xs text-slate-300">{statusMsg ?? "Loading…"}</p>
-        </div>
-      )}
-
-      {error && !loading && (
-        <div className="rounded-lg border border-red-900/50 bg-red-950/30 p-4">
-          <p className="text-xs text-red-300 whitespace-pre-wrap">{error}</p>
-        </div>
-      )}
-
-      {!loading && dept && (
-        <>
-          <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-4">
-            <div className="text-lg font-semibold text-slate-100">{dept.name}</div>
-            <div className="mt-1 text-xs text-slate-300">
-              {[dept.city, dept.state].filter(Boolean).join(", ") || "—"}{" "}
-              {dept.neris_department_id ? (
-                <>
-                  · <span className="text-slate-400">NERIS ID:</span>{" "}
-                  <span className="text-slate-100">{dept.neris_department_id}</span>
-                </>
-              ) : null}
-            </div>
-
-            <div className="mt-3 grid gap-3 sm:grid-cols-3">
-              <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
-                <div className="text-[10px] uppercase tracking-wide text-slate-400">Total incidents</div>
-                <div className="text-xl font-semibold text-slate-100">{totalIncidents}</div>
-                <div className="text-[11px] text-slate-400">
-                  Showing <span className="text-slate-200">{showingIncidents}</span> • {activeFiltersText}
-                </div>
-              </div>
-              <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
-                <div className="text-[10px] uppercase tracking-wide text-slate-400">Trend (30 vs 90)</div>
-                <div className="mt-1 text-[11px] text-slate-300">
-                  <span className="text-slate-100 font-semibold">{count30}</span> in 30d ·{" "}
-                  <span className="text-slate-100 font-semibold">{count90}</span> in 90d
-                </div>
-              </div>
-              <div className="rounded-md border border-slate-800 bg-slate-950/30 p-3">
-                <div className="text-[10px] uppercase tracking-wide text-slate-400">Top hotspot (mapped)</div>
-                <div className="mt-1 text-[11px] text-slate-300">
-                  {topCluster ? (
-                    <>
-                      <span className="text-slate-100 font-semibold">{topCluster.count}</span> incidents · Dominant{" "}
-                      <span className="text-slate-100">{categoryMeta(topCluster.dominantCategory).label}</span>
-                    </>
-                  ) : (
-                    "—"
-                  )}
-                </div>
-              </div>
-            </div>
+        <div className="print-grid">
+          <div className="print-card print-avoid-break">
+            <h3>Volume</h3>
+            <div className="print-value">{showingIncidents}</div>
+            <div className="print-note">Incidents matching current filters</div>
           </div>
 
-          <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <div className="text-sm font-semibold text-slate-100">NERIS Hotspot Intelligence Map</div>
-                <div className="mt-1 text-[11px] text-slate-400">
-                  Hotspots indicate <span className="text-slate-200">density patterns</span> for triage and planning —
-                  not cause/origin/conclusions (NFPA-aligned discipline).
-                </div>
+          <div className="print-card print-avoid-break">
+            <h3>Mapped Preview</h3>
+            <div className="print-value">{pins.length}</div>
+            <div className="print-note">Mapped pins (demo subset)</div>
+          </div>
+
+          <div className="print-card print-avoid-break">
+            <h3>Hotspots</h3>
+            <div className="print-value">{clusters.length}</div>
+            <div className="print-note">Cluster(s) from mapped pins</div>
+          </div>
+
+          <div className="print-card print-avoid-break">
+            <h3>Trend</h3>
+            <div className="print-value">
+              {count30} / {count90}
+            </div>
+            <div className="print-note">30d vs 90d (category-aware)</div>
+          </div>
+        </div>
+
+        <div className="print-card print-avoid-break" style={{ marginTop: 12 }}>
+          <h3>Top hotspot</h3>
+          {topCluster ? (
+            <>
+              <div className="print-note">
+                <strong>{topCluster.count}</strong> incident(s) • Dominant category:{" "}
+                <strong>{categoryMeta(topCluster.dominantCategory).label}</strong>
+              </div>
+              <div className="print-note">
+                Hotspot location is approximate and based on geocoded preview pins.
+              </div>
+            </>
+          ) : (
+            <div className="print-note">No hotspots computed for current mapped subset.</div>
+          )}
+        </div>
+
+        <div className="print-card print-avoid-break" style={{ marginTop: 12 }}>
+          <h3>Hotspot drilldown</h3>
+          {selectedCluster ? (
+            <>
+              <div className="print-note">
+                Selected hotspot: <strong>{selectedCluster.count}</strong> incident(s) • Dominant:{" "}
+                <strong>{categoryMeta(selectedCluster.dominantCategory).label}</strong>
               </div>
 
-              <div className="flex items-center gap-2">
-                <MapModeToggle
-                  value={mapMode}
-                  onChange={(v) => {
-                    setMapMode(v);
-                    if (v === "pins") setSelectedCluster(null);
-                  }}
-                />
+              <div className="print-list">
+                {drilldownPins.slice(0, 12).map((p) => {
+                  const dt = fmtLocalUtc(p.occurredAt ?? null);
+                  return (
+                    <div key={p.incidentId} className="print-row">
+                      <div>
+                        <div className="print-k">Date</div>
+                        <div className="print-v">{dt.local}</div>
+                      </div>
+                      <div>
+                        <div className="print-k">Incident</div>
+                        <div className="print-v">
+                          {p.label} • {categoryMeta(classifyIncident(p.incident)).label}
+                        </div>
+                        <div className="print-k" style={{ marginTop: 2 }}>
+                          {p.locationText}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {drilldownPins.length > 12 ? (
+                <div className="print-note">Showing 12 of {drilldownPins.length} incident(s) in this hotspot.</div>
+              ) : null}
+            </>
+          ) : (
+            <>
+              <div className="print-note">
+                No hotspot selected. Tip: select a hotspot on the map to include drilldown details.
+              </div>
+              {topHotspots.length > 0 ? (
+                <div className="print-note">
+                  Top hotspots (mapped):{" "}
+                  {topHotspots
+                    .map(
+                      (h) =>
+                        `${h.count} (${categoryMeta(h.dominantCategory).label})`
+                    )
+                    .join(" • ")}
+                </div>
+              ) : null}
+            </>
+          )}
+        </div>
+
+        <div className="print-footer">
+          NFPA-aligned note: Hotspots represent density patterns for triage and resource planning. They do not imply
+          cause, origin, responsibility, or investigative conclusions. Use NFPA 921 / 1033 discipline for conclusions.
+        </div>
+      </div>
+
+      {/* Screen UI */}
+      <div className="no-print">
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold text-orange-400">Department</h1>
+            <p className="text-xs text-slate-300">
+              Dept ID: <span className="text-slate-100">{idStr}</span>
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={exportBrief}
+              className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-100 hover:border-orange-400"
+              title="Opens the browser Print dialog (choose Save as PDF)"
+            >
+              Export Hotspot Brief (Print/PDF)
+            </button>
+
+            <Link
+              href="/departments"
+              className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100 hover:border-orange-400"
+            >
+              ← Back to Departments
+            </Link>
+          </div>
+        </div>
+
+        <div className="text-[11px] text-slate-500">
+          Backend: <span className="text-slate-300">{apiBase}</span>
+        </div>
+
+        {loading && (
+          <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-4">
+            <p className="text-xs text-slate-300">{statusMsg ?? "Loading…"}</p>
+          </div>
+        )}
+
+        {error && !loading && (
+          <div className="rounded-lg border border-red-900/50 bg-red-950/30 p-4">
+            <p className="text-xs text-red-300 whitespace-pre-wrap">{error}</p>
+          </div>
+        )}
+
+        {!loading && dept && (
+          <>
+            <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-4">
+              <div className="text-lg font-semibold text-slate-100">{dept.name}</div>
+              <div className="mt-1 text-xs text-slate-300">
+                {[dept.city, dept.state].filter(Boolean).join(", ") || "—"}{" "}
+                {dept.neris_department_id ? (
+                  <>
+                    · <span className="text-slate-400">NERIS ID:</span>{" "}
+                    <span className="text-slate-100">{dept.neris_department_id}</span>
+                  </>
+                ) : null}
+              </div>
+
+              <div className="mt-4 flex flex-wrap items-center gap-2">
                 <button
                   type="button"
                   className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100 hover:border-orange-400"
@@ -1039,6 +1188,7 @@ export default function DepartmentDetailPage() {
                 >
                   Reset filters
                 </button>
+
                 {deptMapLink ? (
                   <a
                     className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100 hover:border-orange-400"
@@ -1052,70 +1202,118 @@ export default function DepartmentDetailPage() {
               </div>
             </div>
 
-            <div className="mt-3 rounded-md border border-slate-800 bg-slate-950/20 p-3 space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
+              <div className="flex items-start justify-between gap-3">
                 <div>
-                  <div className="text-[10px] uppercase tracking-wide text-slate-400">Time window</div>
-                  <div className="mt-1 text-[11px] text-slate-300">
-                    Showing <span className="text-slate-100">{showingIncidents}</span> of{" "}
-                    <span className="text-slate-100">{totalIncidents}</span> incidents
+                  <div className="text-sm font-semibold text-slate-100">NERIS Hotspot Intelligence Map</div>
+                  <div className="mt-1 text-[11px] text-slate-400">
+                    Hotspots indicate <span className="text-slate-200">density patterns</span> for triage and planning —
+                    not cause/origin/conclusions (NFPA-aligned discipline).
                   </div>
                 </div>
-                <TimeFilterChips value={timeRange} onChange={setTimeRange} />
+
+                <MapModeToggle
+                  value={mapMode}
+                  onChange={(v) => {
+                    setMapMode(v);
+                    if (v === "pins") setSelectedCluster(null);
+                  }}
+                />
               </div>
 
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <div className="text-[10px] uppercase tracking-wide text-slate-400">Category filter</div>
-                  <div className="mt-1 text-[11px] text-slate-300">Active: {activeFiltersText}</div>
-                </div>
-                <TypeFilterChips value={typeFilter} onChange={setTypeFilter} />
-              </div>
-            </div>
-
-            <div className="mt-3 overflow-hidden rounded-md border border-slate-800 bg-slate-950/30">
-              <HotspotLeafletMap
-                center={deptCenter}
-                pins={pins}
-                clusters={clusters}
-                departmentId={dept.id}
-                mode={mapMode}
-                onHotspotClick={(c) => setSelectedCluster(c)}
-              />
-            </div>
-
-            <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-              <div className="text-[11px] text-slate-400">{mapNote ?? (mapLoading ? "Geocoding…" : "—")}</div>
-              <div className="text-[11px] text-slate-500">
-                {mapMode === "pins"
-                  ? "Pins: click a dot to open an incident."
-                  : `Hotspots: ${clusters.length} cluster(s) from ${pins.length} pin(s). Click the number badge to drill down.`}
-              </div>
-            </div>
-
-            {mapMode === "hotspots" && selectedCluster ? (
-              <div className="mt-3 rounded-md border border-slate-800 bg-slate-950/20 p-3">
-                <div className="flex items-start justify-between gap-3">
+              <div className="mt-3 rounded-md border border-slate-800 bg-slate-950/20 p-3 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
-                    <div className="text-[10px] uppercase tracking-wide text-slate-400">Hotspot drilldown</div>
+                    <div className="text-[10px] uppercase tracking-wide text-slate-400">Time window</div>
                     <div className="mt-1 text-[11px] text-slate-300">
-                      <span className="text-slate-100 font-semibold">{selectedCluster.count}</span> incident(s) in this
-                      cluster • Dominant:{" "}
-                      <span className="text-slate-100">{categoryMeta(selectedCluster.dominantCategory).label}</span>
+                      Showing <span className="text-slate-100">{showingIncidents}</span> of{" "}
+                      <span className="text-slate-100">{totalIncidents}</span> incidents
                     </div>
                   </div>
-
-                  <button
-                    type="button"
-                    className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100 hover:border-orange-400"
-                    onClick={() => setSelectedCluster(null)}
-                  >
-                    Clear
-                  </button>
+                  <TimeFilterChips value={timeRange} onChange={setTimeRange} />
                 </div>
 
-                <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                  {drilldownPins.map((p) => (
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <div className="text-[10px] uppercase tracking-wide text-slate-400">Category filter</div>
+                    <div className="mt-1 text-[11px] text-slate-300">Active: {activeFiltersText}</div>
+                  </div>
+                  <TypeFilterChips value={typeFilter} onChange={setTypeFilter} />
+                </div>
+              </div>
+
+              <div className="mt-3 overflow-hidden rounded-md border border-slate-800 bg-slate-950/30">
+                <HotspotLeafletMap
+                  center={deptCenter}
+                  pins={pins}
+                  clusters={clusters}
+                  departmentId={dept.id}
+                  mode={mapMode}
+                  onHotspotClick={(c) => setSelectedCluster(c)}
+                />
+              </div>
+
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                <div className="text-[11px] text-slate-400">{mapNote ?? (mapLoading ? "Geocoding…" : "—")}</div>
+                <div className="text-[11px] text-slate-500">
+                  {mapMode === "pins"
+                    ? "Pins: click a dot to open an incident."
+                    : `Hotspots: ${clusters.length} cluster(s) from ${pins.length} pin(s). Click the circle or number badge to drill down.`}
+                </div>
+              </div>
+
+              {mapMode === "hotspots" && selectedCluster ? (
+                <div className="mt-3 rounded-md border border-slate-800 bg-slate-950/20 p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-[10px] uppercase tracking-wide text-slate-400">Hotspot drilldown</div>
+                      <div className="mt-1 text-[11px] text-slate-300">
+                        <span className="text-slate-100 font-semibold">{selectedCluster.count}</span> incident(s) •
+                        Dominant:{" "}
+                        <span className="text-slate-100">{categoryMeta(selectedCluster.dominantCategory).label}</span>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100 hover:border-orange-400"
+                      onClick={() => setSelectedCluster(null)}
+                    >
+                      Clear
+                    </button>
+                  </div>
+
+                  <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                    {drilldownPins.slice(0, 12).map((p) => (
+                      <Link
+                        key={p.incidentId}
+                        href={`/incidents/${p.incidentId}?departmentId=${dept.id}`}
+                        className="block rounded-md border border-slate-800 bg-slate-950/30 p-3 hover:border-orange-400"
+                        title={p.locationText}
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <div className="text-xs font-semibold text-slate-100">{p.label}</div>
+                              <CategoryPill incident={p.incident} />
+                            </div>
+                            <div className="mt-1 truncate text-[11px] text-slate-400">{p.locationText}</div>
+                          </div>
+                          <div className="text-right text-[11px]">
+                            <DateBlock iso={p.occurredAt ?? null} />
+                          </div>
+                        </div>
+                      </Link>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                {pins.length === 0 ? (
+                  <div className="text-xs text-slate-300">No pinned incidents match the active filters.</div>
+                ) : (
+                  pins.map((p) => (
                     <Link
                       key={p.incidentId}
                       href={`/incidents/${p.incidentId}?departmentId=${dept.id}`}
@@ -1135,41 +1333,13 @@ export default function DepartmentDetailPage() {
                         </div>
                       </div>
                     </Link>
-                  ))}
-                </div>
+                  ))
+                )}
               </div>
-            ) : null}
-
-            <div className="mt-3 grid gap-2 sm:grid-cols-2">
-              {pins.length === 0 ? (
-                <div className="text-xs text-slate-300">No pinned incidents match the active filters.</div>
-              ) : (
-                pins.map((p) => (
-                  <Link
-                    key={p.incidentId}
-                    href={`/incidents/${p.incidentId}?departmentId=${dept.id}`}
-                    className="block rounded-md border border-slate-800 bg-slate-950/30 p-3 hover:border-orange-400"
-                    title={p.locationText}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <div className="text-xs font-semibold text-slate-100">{p.label}</div>
-                          <CategoryPill incident={p.incident} />
-                        </div>
-                        <div className="mt-1 truncate text-[11px] text-slate-400">{p.locationText}</div>
-                      </div>
-                      <div className="text-right text-[11px]">
-                        <DateBlock iso={p.occurredAt ?? null} />
-                      </div>
-                    </div>
-                  </Link>
-                ))
-              )}
             </div>
-          </div>
-        </>
-      )}
+          </>
+        )}
+      </div>
     </section>
   );
 }
