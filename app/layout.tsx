@@ -1,15 +1,24 @@
-// app/layout.tsx
-export const dynamic = "force-dynamic";
+"use client";
 
 import type { Metadata } from "next";
 import Link from "next/link";
 import "./globals.css";
-import { cookies } from "next/headers";
+import { useEffect, useMemo, useState } from "react";
+import { usePathname, useSearchParams } from "next/navigation";
 
+// Note: metadata export is ignored in client components in some Next versions.
+// Keeping it here is harmless; your app title/description may already be set elsewhere.
 export const metadata: Metadata = {
   title: "InfernoIntelAI NERIS Portal",
   description: "NERIS Hotspot Intelligence & Grant Assistant by FireForge LLC",
 };
+
+function parseDeptId(raw: string | null): string | null {
+  if (!raw) return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return String(Math.floor(n));
+}
 
 function deptHrefFromId(id?: string | null) {
   return id ? `/departments/${id}` : "/departments";
@@ -19,26 +28,56 @@ function incidentsHrefFromId(id?: string | null) {
   return id ? `/incidents?departmentId=${id}` : "/incidents";
 }
 
-export default async function RootLayout({
+export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
-  // Next 16: cookies() is async
-  const cookieStore = await cookies();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
 
-  // Try a few reasonable cookie names (use whichever you already set elsewhere)
-  const selectedDeptId =
-    cookieStore.get("neris_selected_department_id")?.value ??
-    cookieStore.get("selected_department_id")?.value ??
-    cookieStore.get("department_id")?.value ??
-    null;
+  const [activeDeptId, setActiveDeptId] = useState<string | null>(null);
 
-  // Optional: allow a demo fallback (set in Vercel env if you want)
-  const demoDeptId = process.env.DEMO_DEPARTMENT_ID ?? null;
+  // 1) On first mount, load sticky dept from localStorage (demo-proof)
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem("activeDepartmentId");
+      if (stored) setActiveDeptId(stored);
+    } catch {
+      // ignore
+    }
+  }, []);
 
-  const activeDeptId = selectedDeptId ?? demoDeptId;
+  // 2) Whenever URL contains departmentId, promote it to “active” and persist
+  useEffect(() => {
+    const urlDept = parseDeptId(searchParams.get("departmentId"));
+    if (!urlDept) return;
 
-  const departmentsHref = deptHrefFromId(activeDeptId);
-  const incidentsHref = incidentsHrefFromId(activeDeptId);
+    setActiveDeptId(urlDept);
+    try {
+      localStorage.setItem("activeDepartmentId", urlDept);
+    } catch {
+      // ignore
+    }
+  }, [searchParams]);
+
+  // 3) Also, when visiting a department detail page (/departments/[id]), infer it
+  useEffect(() => {
+    // match /departments/123
+    const m = pathname.match(/^\/departments\/(\d+)(\/|$)/);
+    if (!m?.[1]) return;
+
+    const inferred = parseDeptId(m[1]);
+    if (!inferred) return;
+
+    setActiveDeptId(inferred);
+    try {
+      localStorage.setItem("activeDepartmentId", inferred);
+    } catch {
+      // ignore
+    }
+  }, [pathname]);
+
+  const departmentsHref = useMemo(() => deptHrefFromId(activeDeptId), [activeDeptId]);
+  const incidentsHref = useMemo(() => incidentsHrefFromId(activeDeptId), [activeDeptId]);
 
   return (
     <html lang="en">
@@ -48,27 +87,21 @@ export default async function RootLayout({
             <div className="flex items-center gap-3">
               <div className="h-8 w-8 rounded-lg bg-gradient-to-br from-orange-500 to-red-600" />
               <div className="leading-tight">
-                <div className="text-sm font-semibold text-orange-400">
-                  FireForge LLC
-                </div>
-                <div className="text-xs text-slate-300">
-                  InfernoIntelAI – NERIS Portal
-                </div>
+                <div className="text-sm font-semibold text-orange-400">FireForge LLC</div>
+                <div className="text-xs text-slate-300">InfernoIntelAI – NERIS Portal</div>
               </div>
 
-              {/* ✅ Option A: Active Department indicator (demo-polish) */}
+              {/* ✅ Option A: Active Dept indicator that actually updates */}
               <div
                 className="hidden sm:inline-flex items-center gap-2 rounded-full border border-slate-700 bg-slate-950/30 px-3 py-1 text-xs text-slate-200"
                 title={
                   activeDeptId
-                    ? `Active department context is set (ID: ${activeDeptId}).`
-                    : "No active department context yet. Select a department on the Dashboard."
+                    ? `Active department context set (ID: ${activeDeptId})`
+                    : "No active department set yet. Pick one on the Dashboard."
                 }
               >
                 <span className="text-slate-400">Active Dept:</span>
-                <span className="font-mono">
-                  {activeDeptId ? activeDeptId : "not set"}
-                </span>
+                <span className="font-mono">{activeDeptId ?? "not set"}</span>
               </div>
             </div>
 
@@ -83,30 +116,24 @@ export default async function RootLayout({
                 Dashboard
               </Link>
 
-              {/* ✅ Option A: preserve dept context when known */}
+              {/* ✅ Always context-aware via activeDeptId */}
               <Link className="hover:text-orange-400" href={incidentsHref}>
                 Incidents
               </Link>
 
-              {/* ✅ Departments goes to “current” dept detail when known */}
               <Link className="hover:text-orange-400" href={departmentsHref}>
                 Departments
               </Link>
             </nav>
           </div>
 
-          {/* Optional small helper when no active dept is known */}
           {!activeDeptId ? (
             <div className="border-t border-slate-800 bg-slate-950/20">
               <div className="mx-auto flex max-w-5xl items-center justify-between px-4 py-2 text-xs text-slate-400">
                 <span>
-                  Tip: Select a department on the Dashboard to keep navigation
-                  “locked” to that department.
+                  Tip: Select a department on the Dashboard to keep navigation locked to that department.
                 </span>
-                <Link
-                  href="/dashboard"
-                  className="text-orange-300 hover:text-orange-200"
-                >
+                <Link href="/dashboard" className="text-orange-300 hover:text-orange-200">
                   Go to Dashboard →
                 </Link>
               </div>
@@ -118,9 +145,7 @@ export default async function RootLayout({
 
         <footer className="mt-12 border-t border-slate-800 bg-slate-900/60">
           <div className="mx-auto flex max-w-5xl items-center justify-between px-4 py-4 text-xs text-slate-400">
-            <span>
-              © {new Date().getFullYear()} FireForge Expert Consulting LLC
-            </span>
+            <span>© {new Date().getFullYear()} FireForge Expert Consulting LLC</span>
             <span>NFPA 921-aligned tools for fire investigators</span>
           </div>
         </footer>
