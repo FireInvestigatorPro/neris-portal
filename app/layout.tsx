@@ -3,7 +3,6 @@
 import Link from "next/link";
 import "./globals.css";
 import { useEffect, useMemo, useState } from "react";
-import { usePathname, useSearchParams } from "next/navigation";
 
 function parseDeptId(raw: string | null): string | null {
   if (!raw) return null;
@@ -20,15 +19,34 @@ function incidentsHrefFromId(id?: string | null) {
   return id ? `/incidents?departmentId=${id}` : "/incidents";
 }
 
+function readDeptFromLocation(): string | null {
+  try {
+    const url = new URL(window.location.href);
+
+    // 1) Prefer ?departmentId=
+    const q = parseDeptId(url.searchParams.get("departmentId"));
+    if (q) return q;
+
+    // 2) Infer from /departments/[id]
+    const m = url.pathname.match(/^\/departments\/(\d+)(\/|$)/);
+    if (m?.[1]) {
+      const inferred = parseDeptId(m[1]);
+      if (inferred) return inferred;
+    }
+
+    // 3) No dept context in URL
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
-  const pathname = usePathname();
-  const searchParams = useSearchParams();
-
   const [activeDeptId, setActiveDeptId] = useState<string | null>(null);
 
-  // 1) On first mount, load sticky dept from localStorage
+  // On first mount, load sticky dept from localStorage, then upgrade from URL if present
   useEffect(() => {
     try {
       const stored = localStorage.getItem("activeDepartmentId");
@@ -36,36 +54,32 @@ export default function RootLayout({
     } catch {
       // ignore
     }
+
+    const fromUrl = readDeptFromLocation();
+    if (fromUrl) {
+      setActiveDeptId(fromUrl);
+      try {
+        localStorage.setItem("activeDepartmentId", fromUrl);
+      } catch {
+        // ignore
+      }
+    }
+
+    // Keep in sync on browser navigation (back/forward)
+    const onPop = () => {
+      const next = readDeptFromLocation();
+      if (!next) return;
+      setActiveDeptId(next);
+      try {
+        localStorage.setItem("activeDepartmentId", next);
+      } catch {
+        // ignore
+      }
+    };
+
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
   }, []);
-
-  // 2) If URL contains departmentId, promote it to “active” and persist
-  useEffect(() => {
-    const urlDept = parseDeptId(searchParams.get("departmentId"));
-    if (!urlDept) return;
-
-    setActiveDeptId(urlDept);
-    try {
-      localStorage.setItem("activeDepartmentId", urlDept);
-    } catch {
-      // ignore
-    }
-  }, [searchParams]);
-
-  // 3) If visiting /departments/[id], infer it and persist
-  useEffect(() => {
-    const m = pathname.match(/^\/departments\/(\d+)(\/|$)/);
-    if (!m?.[1]) return;
-
-    const inferred = parseDeptId(m[1]);
-    if (!inferred) return;
-
-    setActiveDeptId(inferred);
-    try {
-      localStorage.setItem("activeDepartmentId", inferred);
-    } catch {
-      // ignore
-    }
-  }, [pathname]);
 
   const departmentsHref = useMemo(() => deptHrefFromId(activeDeptId), [activeDeptId]);
   const incidentsHref = useMemo(() => incidentsHrefFromId(activeDeptId), [activeDeptId]);
