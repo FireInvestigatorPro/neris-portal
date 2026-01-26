@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import "./globals.css";
 import { cookies } from "next/headers";
+import ActiveDeptChip from "./_components/ActiveDeptChip";
 
 export const metadata: Metadata = {
   title: "InfernoIntelAI NERIS Portal",
@@ -19,7 +20,7 @@ function incidentsHrefFromId(id?: string | null) {
 export default async function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
-  // Next 16: cookies() is async
+  // Keep cookies for link defaults (safe + already working)
   const cookieStore = await cookies();
 
   const selectedDeptId =
@@ -47,18 +48,8 @@ export default async function RootLayout({
                 </div>
               </div>
 
-              {/* Server-side chip (may show "not set" until we wire the client chip next) */}
-              <div
-                className="hidden sm:inline-flex items-center gap-2 rounded-full border border-slate-700 bg-slate-950/30 px-3 py-1 text-xs text-slate-200"
-                title={
-                  selectedDeptId
-                    ? `Active department context set (ID: ${selectedDeptId})`
-                    : "No active department cookie set yet."
-                }
-              >
-                <span className="text-slate-400">Active Dept:</span>
-                <span className="font-mono">{selectedDeptId ?? "not set"}</span>
-              </div>
+              {/* ✅ Client-side Active Department chip (FIXED) */}
+              <ActiveDeptChip />
             </div>
 
             <nav className="flex items-center gap-4 text-sm">
