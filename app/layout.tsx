@@ -1,17 +1,9 @@
 "use client";
 
-import type { Metadata } from "next";
 import Link from "next/link";
 import "./globals.css";
 import { useEffect, useMemo, useState } from "react";
 import { usePathname, useSearchParams } from "next/navigation";
-
-// Note: metadata export is ignored in client components in some Next versions.
-// Keeping it here is harmless; your app title/description may already be set elsewhere.
-export const metadata: Metadata = {
-  title: "InfernoIntelAI NERIS Portal",
-  description: "NERIS Hotspot Intelligence & Grant Assistant by FireForge LLC",
-};
 
 function parseDeptId(raw: string | null): string | null {
   if (!raw) return null;
@@ -36,7 +28,7 @@ export default function RootLayout({
 
   const [activeDeptId, setActiveDeptId] = useState<string | null>(null);
 
-  // 1) On first mount, load sticky dept from localStorage (demo-proof)
+  // 1) On first mount, load sticky dept from localStorage
   useEffect(() => {
     try {
       const stored = localStorage.getItem("activeDepartmentId");
@@ -46,7 +38,7 @@ export default function RootLayout({
     }
   }, []);
 
-  // 2) Whenever URL contains departmentId, promote it to “active” and persist
+  // 2) If URL contains departmentId, promote it to “active” and persist
   useEffect(() => {
     const urlDept = parseDeptId(searchParams.get("departmentId"));
     if (!urlDept) return;
@@ -59,9 +51,8 @@ export default function RootLayout({
     }
   }, [searchParams]);
 
-  // 3) Also, when visiting a department detail page (/departments/[id]), infer it
+  // 3) If visiting /departments/[id], infer it and persist
   useEffect(() => {
-    // match /departments/123
     const m = pathname.match(/^\/departments\/(\d+)(\/|$)/);
     if (!m?.[1]) return;
 
@@ -91,7 +82,6 @@ export default function RootLayout({
                 <div className="text-xs text-slate-300">InfernoIntelAI – NERIS Portal</div>
               </div>
 
-              {/* ✅ Option A: Active Dept indicator that actually updates */}
               <div
                 className="hidden sm:inline-flex items-center gap-2 rounded-full border border-slate-700 bg-slate-950/30 px-3 py-1 text-xs text-slate-200"
                 title={
@@ -115,12 +105,9 @@ export default function RootLayout({
               <Link className="hover:text-orange-400" href="/dashboard">
                 Dashboard
               </Link>
-
-              {/* ✅ Always context-aware via activeDeptId */}
               <Link className="hover:text-orange-400" href={incidentsHref}>
                 Incidents
               </Link>
-
               <Link className="hover:text-orange-400" href={departmentsHref}>
                 Departments
               </Link>
