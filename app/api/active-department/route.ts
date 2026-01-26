@@ -7,33 +7,46 @@ function toPositiveInt(value: string | null): number | null {
   return Math.floor(n);
 }
 
+// Cookie names we support (covers layout/header variants)
+const COOKIE_NAMES = [
+  "neris_selected_department_id",
+  "selected_department_id",
+  "department_id",
+] as const;
+
 export async function GET(req: Request) {
   const url = new URL(req.url);
 
   const deptId = toPositiveInt(url.searchParams.get("departmentId"));
   const redirectTo = url.searchParams.get("redirect") || "/dashboard";
 
-  // Always redirect, even if bad input (demo-friendly)
   const res = NextResponse.redirect(new URL(redirectTo, url.origin));
 
+  // Prevent any intermediary caching weirdness
+  res.headers.set("Cache-Control", "no-store, max-age=0");
+
+  // If deptId is missing/invalid, clear all variants to avoid stale context
   if (!deptId) {
-    // If deptId is missing/invalid, clear cookie to avoid stale context
-    res.cookies.set("neris_selected_department_id", "", {
-      path: "/",
-      maxAge: 0,
-      sameSite: "lax",
-    });
+    for (const name of COOKIE_NAMES) {
+      res.cookies.set(name, "", {
+        path: "/",
+        maxAge: 0,
+        sameSite: "lax",
+      });
+    }
     return res;
   }
 
-  // Set active department cookie (used by app/layout.tsx)
-  res.cookies.set("neris_selected_department_id", String(deptId), {
-    path: "/",
-    httpOnly: true,
-    sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
-    maxAge: 60 * 60 * 24 * 30, // 30 days
-  });
+  // Set all variants so whichever one the header/layout is reading will work.
+  for (const name of COOKIE_NAMES) {
+    res.cookies.set(name, String(deptId), {
+      path: "/",
+      httpOnly: true, // server-readable, secure for demo
+      sameSite: "lax",
+      secure: process.env.NODE_ENV === "production",
+      maxAge: 60 * 60 * 24 * 30, // 30 days
+    });
+  }
 
   return res;
 }
