@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { usePathname, useSearchParams } from "next/navigation";
 
 function parseDeptId(raw: string | null): string | null {
   if (!raw) return null;
@@ -9,65 +10,47 @@ function parseDeptId(raw: string | null): string | null {
   return String(Math.floor(n));
 }
 
-function readDeptIdFromUrl(): string | null {
-  try {
-    const url = new URL(window.location.href);
-
-    // 1) Prefer explicit query param
-    const fromQuery = parseDeptId(url.searchParams.get("departmentId"));
-    if (fromQuery) return fromQuery;
-
-    // 2) Infer from /departments/[id]
-    const m = url.pathname.match(/^\/departments\/(\d+)(\/|$)/);
-    if (m?.[1]) {
-      const inferred = parseDeptId(m[1]);
-      if (inferred) return inferred;
-    }
-
-    return null;
-  } catch {
-    return null;
-  }
+function inferDeptIdFromPath(pathname: string): string | null {
+  // /departments/123
+  const m = pathname.match(/^\/departments\/(\d+)(\/|$)/);
+  if (!m?.[1]) return null;
+  return parseDeptId(m[1]);
 }
 
 export default function ActiveDeptChip() {
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+
+  // Derived department ID from URL (query param wins)
+  const deptFromUrl = useMemo(() => {
+    const fromQuery = parseDeptId(searchParams.get("departmentId"));
+    if (fromQuery) return fromQuery;
+    return inferDeptIdFromPath(pathname);
+  }, [pathname, searchParams]);
+
   const [activeDeptId, setActiveDeptId] = useState<string | null>(null);
 
+  // On first mount, hydrate from localStorage for stickiness
   useEffect(() => {
-    // Load from localStorage first (sticky)
     try {
       const stored = localStorage.getItem("activeDepartmentId");
       if (stored) setActiveDeptId(stored);
     } catch {
       // ignore
     }
-
-    // Upgrade from URL if present (authoritative)
-    const fromUrl = readDeptIdFromUrl();
-    if (fromUrl) {
-      setActiveDeptId(fromUrl);
-      try {
-        localStorage.setItem("activeDepartmentId", fromUrl);
-      } catch {
-        // ignore
-      }
-    }
-
-    // Keep updated on back/forward navigation
-    const onPopState = () => {
-      const next = readDeptIdFromUrl();
-      if (!next) return;
-      setActiveDeptId(next);
-      try {
-        localStorage.setItem("activeDepartmentId", next);
-      } catch {
-        // ignore
-      }
-    };
-
-    window.addEventListener("popstate", onPopState);
-    return () => window.removeEventListener("popstate", onPopState);
   }, []);
+
+  // ✅ Critical: whenever the URL changes, update the chip and persist
+  useEffect(() => {
+    if (!deptFromUrl) return;
+
+    setActiveDeptId(deptFromUrl);
+    try {
+      localStorage.setItem("activeDepartmentId", deptFromUrl);
+    } catch {
+      // ignore
+    }
+  }, [deptFromUrl]);
 
   return (
     <div
