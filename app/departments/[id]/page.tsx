@@ -1,18 +1,22 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
 /**
- * Department Hotspot Intelligence page
- * - Interactive Leaflet OSM map (pins + hotspot circles)
- * - Hotspot drilldown panel
- * - Print/PDF "Hotspot Brief" export
- * - Top Hotspots ranked list (Option 2)
+ * InfernoIntelAI — Department Hotspot Intelligence Page
+ * Demo-polish mindset:
+ * - Works with minimal backend fields
+ * - NFPA-aligned language: hotspot/density ≠ cause/origin conclusion
+ * - Investor-ready: print/export brief + AI Assist (AFG/SAFER/CRR drafts)
  *
- * NOTE: Demo-safe only. No backend writes.
+ * NOTE: This page is intentionally client-side (Leaflet + local draft text).
  */
+
+// -----------------------------
+// Types
+// -----------------------------
 
 type Department = {
   id: number;
@@ -26,19 +30,13 @@ type Department = {
 
 type ApiIncident = {
   id: number;
-  department_id: number;
   occurred_at: string | null;
   address: string | null;
   city: string | null;
   state: string | null;
-  neris_incident_id: string | null;
-
-  incident_type_code?: number | string | null;
-  incident_type?: number | string | null;
-  neris_incident_type_code?: number | string | null;
-
-  created_at?: string;
-  updated_at?: string;
+  department_id: number;
+  neris_incident_id?: string | null;
+  incident_type_code?: string | null;
 };
 
 type GeoPoint = { lat: number; lon: number };
@@ -46,150 +44,621 @@ type GeoPoint = { lat: number; lon: number };
 type IncidentPin = {
   incidentId: number;
   label: string;
-  locationText: string;
-  occurredAt?: string | null;
-  point: GeoPoint;
-  incident: ApiIncident;
+  addressLine: string;
+  occurredAt: string | null;
+  lat: number;
+  lon: number;
+  categoryKey: TypeFilterKey;
 };
-
-type IncidentCategoryKey = "structure" | "vehicle" | "outside" | "other" | "unknown";
 
 type HotspotCluster = {
   id: string;
   center: GeoPoint;
+  radiusMeters: number;
   count: number;
+  dominantCategory: TypeFilterKey;
   pins: IncidentPin[];
-  dominantCategory: IncidentCategoryKey;
 };
 
-type TimeRangeKey = "all" | "30" | "90" | "365";
 type MapMode = "pins" | "hotspots";
-type TypeFilterKey = "all" | IncidentCategoryKey;
 
-/* =========================
-   AI Assist — Grant Narrative
-   (inline + demo-safe)
-   ========================= */
+type TimeRangeKey = "30" | "90" | "180" | "365" | "all";
 
-type GrantMode = "AFG" | "SAFER";
+type TypeFilterKey =
+  | "all"
+  // Core demo categories (NERIS-ish “type buckets”)
+  | "fire"
+  | "ems"
+  | "hazmat"
+  | "service"
+  | "false_alarm"
+  | "other";
+
+type GrantMode = "AFG" | "SAFER" | "CRR";
+
+// -----------------------------
+// Config / Utilities
+// -----------------------------
+
+function cn(...classes: Array<string | false | null | undefined>) {
+  return classes.filter(Boolean).join(" ");
+}
+
+function getApiBase() {
+  // Same pattern you’ve used elsewhere — keep stable for Vercel.
+  const env = process.env.NEXT_PUBLIC_API_BASE?.trim();
+  if (env) return env.replace(/\/+$/, "");
+  return "";
+}
+
+async function safeJson(res: Response) {
+  try {
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+function fmtLocalUtc(iso: string) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return { local: iso, utc: iso };
+  return {
+    local: d.toLocaleString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    }),
+    utc: d.toUTCString(),
+  };
+}
+
+function normalizeAddressParts(parts: Array<string | null | undefined>) {
+  return parts
+    .map((p) => (p ?? "").trim())
+    .filter(Boolean)
+    .join(", ");
+}
+
+function buildDeptQuery(dept: Department) {
+  return normalizeAddressParts([dept.name, dept.city ?? null, dept.state ?? null]);
+}
+
+function osmSearchUrl(q: string) {
+  const u = new URL("https://www.openstreetmap.org/search");
+  u.searchParams.set("query", q);
+  return u.toString();
+}
+
+function incidentAddressLine(i: ApiIncident) {
+  return normalizeAddressParts([i.address, i.city, i.state]);
+}
+
+function timeRangeLabel(k: TimeRangeKey) {
+  switch (k) {
+    case "30":
+      return "Last 30 days";
+    case "90":
+      return "Last 90 days";
+    case "180":
+      return "Last 180 days";
+    case "365":
+      return "Last 365 days";
+    case "all":
+      return "All time";
+  }
+}
+
+function rangeStartDate(timeRange: TimeRangeKey) {
+  if (timeRange === "all") return null;
+  const now = new Date();
+  const days = Number(timeRange);
+  const start = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
+  return start;
+}
+
+/**
+ * Demo category mapping.
+ * In a real build we’ll map exact NERIS incident codes → a controlled taxonomy.
+ */
+function classifyIncident(i: ApiIncident): TypeFilterKey {
+  // If you have a real NERIS incident_type_code, map it here.
+  const t = (i.incident_type_code ?? "").toLowerCase();
+
+  if (t.includes("fire")) return "fire";
+  if (t.includes("ems") || t.includes("medical")) return "ems";
+  if (t.includes("haz")) return "hazmat";
+  if (t.includes("service") || t.includes("assist")) return "service";
+  if (t.includes("false") || t.includes("alarm")) return "false_alarm";
+
+  // Soft fallback based on presence of neris id (demo only)
+  return "other";
+}
+
+function categoryMeta(k: TypeFilterKey) {
+  switch (k) {
+    case "fire":
+      return { label: "Fire", pinColor: "#ef4444" };
+    case "ems":
+      return { label: "EMS", pinColor: "#22c55e" };
+    case "hazmat":
+      return { label: "HazMat", pinColor: "#a855f7" };
+    case "service":
+      return { label: "Service", pinColor: "#38bdf8" };
+    case "false_alarm":
+      return { label: "False Alarm", pinColor: "#f59e0b" };
+    case "other":
+      return { label: "Other", pinColor: "#94a3b8" };
+    case "all":
+    default:
+      return { label: "All categories", pinColor: "#e2e8f0" };
+  }
+}
+
+// -----------------------------
+// Geocoding (Nominatim / OSM)
+// -----------------------------
+
+/**
+ * Nominatim is rate limited. Demo-safe approach:
+ * - Small batches
+ * - Cache in localStorage
+ */
+function geocodeCacheKey(q: string) {
+  return `geocode:v1:${q.toLowerCase()}`;
+}
+
+function readGeocodeCache(q: string): GeoPoint | null {
+  try {
+    const raw = localStorage.getItem(geocodeCacheKey(q));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed.lat !== "number" || typeof parsed.lon !== "number") return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeGeocodeCache(q: string, p: GeoPoint) {
+  try {
+    localStorage.setItem(geocodeCacheKey(q), JSON.stringify(p));
+  } catch {
+    // ignore
+  }
+}
+
+async function geocodeAddress(q: string, signal?: AbortSignal): Promise<GeoPoint | null> {
+  const cached = typeof window !== "undefined" ? readGeocodeCache(q) : null;
+  if (cached) return cached;
+
+  // Nominatim usage policy: provide a valid UA and keep volume low.
+  const url = new URL("https://nominatim.openstreetmap.org/search");
+  url.searchParams.set("q", q);
+  url.searchParams.set("format", "json");
+  url.searchParams.set("limit", "1");
+
+  const res = await fetch(url.toString(), {
+    method: "GET",
+    headers: {
+      // This is a demo app; still be polite.
+      "Accept-Language": "en",
+    },
+    signal,
+  });
+
+  if (!res.ok) return null;
+
+  const data = (await res.json().catch(() => null)) as any;
+  const first = Array.isArray(data) ? data[0] : null;
+  const lat = first?.lat ? Number(first.lat) : NaN;
+  const lon = first?.lon ? Number(first.lon) : NaN;
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+
+  const p = { lat, lon };
+  try {
+    writeGeocodeCache(q, p);
+  } catch {}
+  return p;
+}
+
+// -----------------------------
+// Hotspot clustering (simple, stable demo approach)
+// -----------------------------
+
+function haversineMeters(a: GeoPoint, b: GeoPoint) {
+  const R = 6371000;
+  const toRad = (x: number) => (x * Math.PI) / 180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLon = toRad(b.lon - a.lon);
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat);
+
+  const sin1 = Math.sin(dLat / 2);
+  const sin2 = Math.sin(dLon / 2);
+
+  const h = sin1 * sin1 + Math.cos(lat1) * Math.cos(lat2) * sin2 * sin2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
+function computeClusters(pins: IncidentPin[], thresholdMeters: number): HotspotCluster[] {
+  // Greedy clustering (demo-safe, predictable).
+  const unused = pins.slice();
+  const clusters: HotspotCluster[] = [];
+
+  while (unused.length) {
+    const seed = unused.shift()!;
+    const group = [seed];
+
+    // Pull in pins close to seed; also allow chaining (simple approach).
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (let i = unused.length - 1; i >= 0; i--) {
+        const p = unused[i];
+        const closeToAny = group.some((g) => haversineMeters({ lat: g.lat, lon: g.lon }, { lat: p.lat, lon: p.lon }) <= thresholdMeters);
+        if (closeToAny) {
+          group.push(p);
+          unused.splice(i, 1);
+          changed = true;
+        }
+      }
+    }
+
+    // Compute center
+    const avgLat = group.reduce((s, p) => s + p.lat, 0) / group.length;
+    const avgLon = group.reduce((s, p) => s + p.lon, 0) / group.length;
+
+    // Compute max radius
+    const center: GeoPoint = { lat: avgLat, lon: avgLon };
+    const radius = Math.max(
+      120,
+      group.reduce((mx, p) => Math.max(mx, haversineMeters(center, { lat: p.lat, lon: p.lon })), 0) + 80
+    );
+
+    // Dominant category
+    const counts = new Map<TypeFilterKey, number>();
+    for (const p of group) counts.set(p.categoryKey, (counts.get(p.categoryKey) ?? 0) + 1);
+    let dominant: TypeFilterKey = "other";
+    let best = -1;
+    for (const [k, v] of counts.entries()) {
+      if (v > best) {
+        best = v;
+        dominant = k;
+      }
+    }
+
+    clusters.push({
+      id: `c_${seed.incidentId}_${group.length}_${Math.round(avgLat * 1000)}_${Math.round(avgLon * 1000)}`,
+      center,
+      radiusMeters: radius,
+      count: group.length,
+      dominantCategory: dominant,
+      pins: group,
+    });
+  }
+
+  // Sort: biggest first
+  clusters.sort((a, b) => b.count - a.count);
+  return clusters;
+}
+
+// -----------------------------
+// UI Components (small, local)
+// -----------------------------
+
+function TimeFilterChips({
+  value,
+  onChange,
+}: {
+  value: TimeRangeKey;
+  onChange: (v: TimeRangeKey) => void;
+}) {
+  const opts: Array<{ key: TimeRangeKey; label: string }> = [
+    { key: "30", label: "30d" },
+    { key: "90", label: "90d" },
+    { key: "180", label: "180d" },
+    { key: "365", label: "365d" },
+    { key: "all", label: "All" },
+  ];
+
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      {opts.map((o) => (
+        <button
+          key={o.key}
+          type="button"
+          onClick={() => onChange(o.key)}
+          className={cn(
+            "rounded-full border px-3 py-1 text-xs font-semibold",
+            value === o.key
+              ? "border-orange-400/60 bg-orange-500/10 text-orange-200"
+              : "border-slate-800 bg-slate-950/20 text-slate-200 hover:border-slate-700"
+          )}
+          aria-pressed={value === o.key}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function TypeFilterChips({
+  value,
+  onChange,
+}: {
+  value: TypeFilterKey;
+  onChange: (v: TypeFilterKey) => void;
+}) {
+  const opts: Array<{ key: TypeFilterKey; label: string }> = [
+    { key: "all", label: "All" },
+    { key: "fire", label: "Fire" },
+    { key: "ems", label: "EMS" },
+    { key: "hazmat", label: "HazMat" },
+    { key: "service", label: "Service" },
+    { key: "false_alarm", label: "False Alarm" },
+    { key: "other", label: "Other" },
+  ];
+
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      {opts.map((o) => (
+        <button
+          key={o.key}
+          type="button"
+          onClick={() => onChange(o.key)}
+          className={cn(
+            "rounded-full border px-3 py-1 text-xs font-semibold",
+            value === o.key
+              ? "border-orange-400/60 bg-orange-500/10 text-orange-200"
+              : "border-slate-800 bg-slate-950/20 text-slate-200 hover:border-slate-700"
+          )}
+          aria-pressed={value === o.key}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function MapModeToggle({
+  value,
+  onChange,
+}: {
+  value: MapMode;
+  onChange: (v: MapMode) => void;
+}) {
+  return (
+    <div className="inline-flex overflow-hidden rounded-md border border-slate-800 bg-slate-950/20">
+      <button
+        type="button"
+        onClick={() => onChange("hotspots")}
+        className={cn(
+          "px-3 py-2 text-xs font-semibold",
+          value === "hotspots" ? "bg-orange-500/20 text-orange-200" : "text-slate-200 hover:bg-slate-950/40"
+        )}
+        aria-pressed={value === "hotspots"}
+        title="Hotspot circles"
+      >
+        Hotspots
+      </button>
+      <button
+        type="button"
+        onClick={() => onChange("pins")}
+        className={cn(
+          "px-3 py-2 text-xs font-semibold",
+          value === "pins" ? "bg-orange-500/20 text-orange-200" : "text-slate-200 hover:bg-slate-950/40"
+        )}
+        aria-pressed={value === "pins"}
+        title="Individual pins"
+      >
+        Pins
+      </button>
+    </div>
+  );
+}
+
+// -----------------------------
+// AI Assist: Grant / CRR drafts
+// -----------------------------
 
 type GrantNarrativeInputs = {
   departmentName: string;
-  city: string;
-  state: string;
+  cityState: string;
   timeWindowLabel: string;
+  categoriesLabel: string;
   mappedIncidentsCount: number;
   hotspotsCount: number;
-  categoriesLabel: string;
+  topHotspotCount: number;
+  trend30: number;
+  trend90: number;
+  nfpaNote: string;
 };
 
 function buildAfgNarrative(i: GrantNarrativeInputs) {
-  const place = [i.city, i.state].filter(Boolean).join(", ");
-  const loc = place ? `${i.departmentName} (${place})` : i.departmentName;
-
   return [
-    `AFG Justification – Draft (Demo “AI Assist”)`,
+    `AFG Narrative Draft (Demo “AI Assist”)`,
     ``,
-    `Department: ${loc}`,
-    `Data window: ${i.timeWindowLabel}`,
-    `Observed activity: ${i.mappedIncidentsCount} mapped incident(s); ${i.hotspotsCount} hotspot cluster(s).`,
-    `Filter: ${i.categoriesLabel}.`,
+    `Department: ${i.departmentName}${i.cityState ? ` (${i.cityState})` : ""}`,
+    `Window: ${i.timeWindowLabel} • Filter: ${i.categoriesLabel}`,
     ``,
     `Problem Statement`,
-    `Recent incident data shows recurring, geographically concentrated call density (“hotspots”) within the ${i.timeWindowLabel} window. This pattern indicates sustained operational demand and elevated risk exposure for responders and the community.`,
+    `${i.departmentName} has identified repeat incident density patterns within our response area using NERIS Hotspot Intelligence. During the ${i.timeWindowLabel} window, the system mapped ${i.mappedIncidentsCount} incident address(es) for analysis and identified ${i.hotspotsCount} hotspot area(s). The leading hotspot contains approximately ${i.topHotspotCount} incident(s) in close proximity, indicating concentrated demand that strains resources and increases operational risk.`,
     ``,
-    `Project Purpose`,
-    `InfernoIntelAI NERIS Hotspot Intelligence converts incident records into operationally useful location intelligence—helping leadership prioritize prevention, readiness, and resource planning. This workflow supports disciplined documentation by separating pattern detection from cause/origin conclusions (NFPA 921-aligned).`,
+    `Project Impact`,
+    `AFG investment will strengthen operational readiness and reduce risk in these demand zones by improving response capability, supporting firefighter safety, and enabling more effective deployment planning. Hotspot intelligence will also help leadership target training and prevention efforts where repeat activity is observed.`,
     ``,
-    `Implementation & Outcome Measures`,
-    `• Use hotspot clusters to target risk-reduction outreach and inspection programs.`,
-    `• Use incident-type and time-window filtering to support evidence-informed resource planning.`,
-    `• Track before/after changes in hotspot density and incident frequency to evaluate impact.`,
+    `Data & Evaluation`,
+    `We will track performance using incident volume trends and hotspot metrics. Current reference: ${i.trend30} incidents in the last 30 days vs ${i.trend90} in the last 90 days (category-aware). We will monitor repeat-location density, response outcomes, and readiness indicators over time.`,
     ``,
-    `Request Summary (fill in)`,
-    `• Equipment/Training/Prevention program requested: [Describe here]`,
-    `• How request addresses the identified risk patterns: [Describe here]`,
-    `• Matching funds/maintenance plan (if applicable): [Describe here]`,
-    ``,
-    `Compliance / Methodology Note`,
-    `This narrative is a planning draft based on incident density patterns and should not be interpreted as a determination of cause, origin, responsibility, or investigative conclusions.`,
+    `NFPA-aligned note`,
+    i.nfpaNote,
   ].join("\n");
 }
 
 function buildSaferNarrative(i: GrantNarrativeInputs) {
-  const place = [i.city, i.state].filter(Boolean).join(", ");
-  const loc = place ? `${i.departmentName} (${place})` : i.departmentName;
-
   return [
-    `SAFER Staffing Justification – Draft (Demo “AI Assist”)`,
+    `SAFER Narrative Draft (Demo “AI Assist”)`,
     ``,
-    `Department: ${loc}`,
-    `Data window: ${i.timeWindowLabel}`,
-    `Observed activity: ${i.mappedIncidentsCount} mapped incident(s); ${i.hotspotsCount} hotspot cluster(s).`,
-    `Filter: ${i.categoriesLabel}.`,
+    `Department: ${i.departmentName}${i.cityState ? ` (${i.cityState})` : ""}`,
+    `Window: ${i.timeWindowLabel} • Filter: ${i.categoriesLabel}`,
     ``,
-    `Operational Need`,
-    `Incident patterns show sustained demand with recurring geographic concentrations that can stress staffing, response times, unit availability, and firefighter safety. Improving staffing levels supports safe and effective operations, especially during peak periods and in recurring hotspot areas.`,
+    `Staffing Need Justification`,
+    `${i.departmentName} experiences concentrated incident activity in specific zones as shown by NERIS Hotspot Intelligence. During the ${i.timeWindowLabel} window, ${i.hotspotsCount} hotspot area(s) were identified from ${i.mappedIncidentsCount} mapped incident address(es). The leading hotspot contains approximately ${i.topHotspotCount} incident(s), indicating repeat demand that can increase fatigue, extend response times, and elevate risk when staffing is constrained.`,
     ``,
-    `How Hotspot Intelligence Supports SAFER Goals`,
-    `• Identifies recurring areas of high incident density to support deployment and scheduling planning.`,
-    `• Provides defensible, data-backed context for staffing decisions.`,
-    `• Creates a repeatable reporting workflow for annual SAFER progress documentation.`,
+    `Operational Impact`,
+    `Additional staffing supports safe, effective operations and helps ensure reliable coverage during repeat-demand periods. Improved staffing strengthens the department’s ability to meet workload surges, manage simultaneous incidents, and sustain training and prevention activities tied to these hotspot zones.`,
     ``,
-    `Request Summary (fill in)`,
-    `• Staffing request: [# positions / roles / shift model]`,
-    `• Impact on response capability & safety: [Describe here]`,
-    `• Retention/recruitment plan (if applicable): [Describe here]`,
+    `Measurement`,
+    `We will track incident workload trends and hotspot counts as a repeat-demand proxy. Current reference: ${i.trend30} incidents in the last 30 days vs ${i.trend90} in the last 90 days. We will also monitor response time stability and repeat-location reduction over time.`,
     ``,
-    `Compliance / Methodology Note`,
-    `This is a planning draft using incident clustering to describe operational demand. It does not assert cause/origin or investigative conclusions (NFPA 921-aligned discipline).`,
+    `NFPA-aligned note`,
+    i.nfpaNote,
   ].join("\n");
 }
 
-function GrantNarrativePanel(props: GrantNarrativeInputs) {
+function buildCrrBrief(i: GrantNarrativeInputs) {
+  return [
+    `CRR Executive Brief – Draft (Demo “AI Assist”)`,
+    ``,
+    `Department: ${i.departmentName}${i.cityState ? ` (${i.cityState})` : ""}`,
+    `Window: ${i.timeWindowLabel} • Filter: ${i.categoriesLabel}`,
+    ``,
+    `Community Risk Reduction (CRR) Summary`,
+    `${i.departmentName} is observing geographically concentrated incident activity during the ${i.timeWindowLabel} window, with ${i.hotspotsCount} hotspot area(s) identified from ${i.mappedIncidentsCount} mapped incident address(es) in the current view. The leading hotspot contains approximately ${i.topHotspotCount} incident(s), suggesting repeat-demand zones where focused prevention, inspection support, and public education can deliver outsized impact.`,
+    ``,
+    `Recommended CRR Actions (select & tailor)`,
+    `• Targeted smoke/CO alarm outreach in hotspot zones`,
+    `• Focused inspections / code enforcement coordination for repeat locations`,
+    `• Public education aligned to incident mix (cooking, electrical, heating, outdoor burning)`,
+    `• Pre-plan updates for high-frequency addresses and critical infrastructure`,
+    `• Partner outreach (schools, senior housing, multifamily property managers)`,
+    ``,
+    `Outcome Metrics (simple + investor-friendly)`,
+    `• Repeat-location incident reduction`,
+    `• Hotspot count and intensity trending over time`,
+    `• Response time stability in peak periods`,
+    `• Severity indicators (e.g., working fire rate / transport rate) where available`,
+    ``,
+    `NFPA-aligned note`,
+    i.nfpaNote,
+  ].join("\n");
+}
+
+function GrantNarrativePanel({
+  departmentName,
+  cityState,
+  timeWindowLabel,
+  categoriesLabel,
+  mappedIncidentsCount,
+  hotspotsCount,
+  topHotspotCount,
+  trend30,
+  trend90,
+}: {
+  departmentName: string;
+  cityState: string;
+  timeWindowLabel: string;
+  categoriesLabel: string;
+  mappedIncidentsCount: number;
+  hotspotsCount: number;
+  topHotspotCount: number;
+  trend30: number;
+  trend90: number;
+}) {
+  const storageKey = useMemo(() => `inferno:grantDraft:${departmentName}`, [departmentName]);
+
   const [mode, setMode] = useState<GrantMode>("AFG");
-  const [draft, setDraft] = useState("");
+  const [draft, setDraft] = useState<string>("");
+
+  const nfpaNote =
+    "Hotspot intelligence describes density patterns for triage and planning; it does not indicate cause/origin or investigative conclusions (NFPA-aligned discipline).";
+
+  const inputs: GrantNarrativeInputs = useMemo(
+    () => ({
+      departmentName,
+      cityState,
+      timeWindowLabel,
+      categoriesLabel,
+      mappedIncidentsCount,
+      hotspotsCount,
+      topHotspotCount,
+      trend30,
+      trend90,
+      nfpaNote,
+    }),
+    [
+      departmentName,
+      cityState,
+      timeWindowLabel,
+      categoriesLabel,
+      mappedIncidentsCount,
+      hotspotsCount,
+      topHotspotCount,
+      trend30,
+      trend90,
+    ]
+  );
 
   useEffect(() => {
-    const generated = mode === "AFG" ? buildAfgNarrative(props) : buildSaferNarrative(props);
+    // Load saved draft
+    try {
+      const saved = localStorage.getItem(storageKey);
+      if (saved) setDraft(saved);
+    } catch {
+      // ignore
+    }
+  }, [storageKey]);
+
+  useEffect(() => {
+    // Auto-generate if empty
+    if (draft.trim().length > 0) return;
+
+    const generated =
+      mode === "AFG" ? buildAfgNarrative(inputs) : mode === "SAFER" ? buildSaferNarrative(inputs) : buildCrrBrief(inputs);
+
     setDraft(generated);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    mode,
-    props.departmentName,
-    props.city,
-    props.state,
-    props.timeWindowLabel,
-    props.mappedIncidentsCount,
-    props.hotspotsCount,
-    props.categoriesLabel,
-  ]);
+  }, [mode, inputs]);
 
-  async function copyToClipboard() {
+  useEffect(() => {
+    // Persist
+    try {
+      localStorage.setItem(storageKey, draft);
+    } catch {
+      // ignore
+    }
+  }, [storageKey, draft]);
+
+  function regen() {
+    const generated =
+      mode === "AFG" ? buildAfgNarrative(inputs) : mode === "SAFER" ? buildSaferNarrative(inputs) : buildCrrBrief(inputs);
+    setDraft(generated);
+  }
+
+  async function copy() {
     try {
       await navigator.clipboard.writeText(draft);
     } catch {
-      // ignore (demo-safe)
+      // ignore
     }
   }
 
   return (
-    <div className="rounded-lg border border-orange-500/25 bg-orange-950/10 p-4">
+    <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <div className="flex items-center gap-2">
-            <div className="text-sm font-semibold text-orange-300">AI Assist — Grant Narrative Draft</div>
-            <span className="rounded-full border border-slate-700 bg-slate-950/30 px-2 py-0.5 text-[10px] text-slate-300">
-              Demo mode
-            </span>
-          </div>
+          <div className="text-sm font-semibold text-slate-100">AI Assist — Grant / CRR Draft</div>
           <div className="mt-1 text-[11px] text-slate-400">
-            Generates editable AFG/SAFER justification language from the current hotspot filters + counts.
+            Generates editable AFG/SAFER justification language and a CRR executive brief from the current hotspot filters + counts.
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="flex overflow-hidden rounded-md border border-slate-700">
+        <div className="flex items-center gap-2">
+          <div className="inline-flex overflow-hidden rounded-md border border-slate-800 bg-slate-950/20">
             <button
               type="button"
               onClick={() => setMode("AFG")}
@@ -218,464 +687,59 @@ function GrantNarrativePanel(props: GrantNarrativeInputs) {
             >
               SAFER
             </button>
+            <button
+              type="button"
+              onClick={() => setMode("CRR")}
+              className={cn(
+                "px-3 py-1 text-xs font-semibold",
+                mode === "CRR"
+                  ? "bg-orange-500/20 text-orange-200"
+                  : "bg-slate-950/20 text-slate-200 hover:bg-slate-950/40"
+              )}
+              aria-pressed={mode === "CRR"}
+              title="CRR brief"
+            >
+              CRR
+            </button>
           </div>
 
           <button
             type="button"
-            onClick={copyToClipboard}
-            className="rounded-md border border-slate-700 bg-slate-950/30 px-3 py-1 text-xs text-slate-200 hover:bg-slate-950/50"
-            title="Copy narrative to clipboard"
+            className="rounded-md border border-slate-800 bg-slate-950/30 px-3 py-2 text-xs font-semibold text-slate-100 hover:border-orange-400"
+            onClick={regen}
+            title="Regenerate draft"
+          >
+            Regenerate
+          </button>
+          <button
+            type="button"
+            className="rounded-md border border-slate-800 bg-slate-950/30 px-3 py-2 text-xs font-semibold text-slate-100 hover:border-orange-400"
+            onClick={copy}
+            title="Copy draft to clipboard"
           >
             Copy
           </button>
         </div>
       </div>
 
-      <div className="mt-3 grid gap-3 md:grid-cols-3">
-        <div className="rounded-md border border-slate-800 bg-slate-950/20 p-3 text-[11px] text-slate-300">
-          <div className="text-[10px] uppercase tracking-wide text-slate-400">Inputs</div>
-          <div className="mt-2 space-y-1">
-            <div>
-              <span className="text-slate-400">Window:</span> {props.timeWindowLabel}
-            </div>
-            <div>
-              <span className="text-slate-400">Category:</span> {props.categoriesLabel}
-            </div>
-            <div>
-              <span className="text-slate-400">Mapped:</span> {props.mappedIncidentsCount} incident(s)
-            </div>
-            <div>
-              <span className="text-slate-400">Hotspots:</span> {props.hotspotsCount} cluster(s)
-            </div>
-          </div>
-          <div className="mt-3 text-[10px] text-slate-500">
-            NFPA note: density patterns ≠ cause/origin conclusions.
-          </div>
-        </div>
-
-        <div className="md:col-span-2">
-          <textarea
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            className="h-56 w-full resize-none rounded-md border border-slate-800 bg-slate-950/30 p-3 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-orange-500/40"
-            aria-label="Grant narrative draft"
-          />
-          <div className="mt-2 text-[11px] text-slate-500">
-            Tip: edit the bracketed lines for your specific request; keep the NFPA note for disciplined claims.
-          </div>
-        </div>
-      </div>
+      <textarea
+        className="mt-3 h-60 w-full resize-none rounded-md border border-slate-800 bg-slate-950/40 p-3 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-orange-500/40"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        placeholder="Your generated draft will appear here…"
+      />
+      <div className="mt-2 text-[11px] text-slate-500">Saved locally to this browser for demo reliability.</div>
     </div>
   );
 }
 
-/* =========================
-   Existing page utilities
-   ========================= */
-
-function getApiBase() {
-  const fallback = "https://infernointelai-backend.onrender.com";
-  return process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") ?? fallback;
-}
-
-async function safeJson(res: Response) {
-  try {
-    return await res.json();
-  } catch {
-    return null;
-  }
-}
-
-function cn(...classes: Array<string | false | null | undefined>) {
-  return classes.filter(Boolean).join(" ");
-}
-
-function fmtLocalUtc(iso?: string | null) {
-  if (!iso) return { local: "—", utc: "—" };
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return { local: String(iso), utc: String(iso) };
-
-  const local = new Intl.DateTimeFormat(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    timeZoneName: "short",
-  }).format(d);
-
-  const utc = new Intl.DateTimeFormat(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    timeZone: "UTC",
-  }).format(d);
-
-  return { local, utc: `${utc} UTC` };
-}
-
-function DateBlock({ iso }: { iso?: string | null }) {
-  const { local, utc } = fmtLocalUtc(iso);
-  return (
-    <div className="leading-tight">
-      <div className="text-slate-200">{local}</div>
-      <div className="text-[10px] text-slate-400">{utc}</div>
-    </div>
-  );
-}
-
-function asNumber(v: unknown): number | null {
-  if (typeof v === "number" && Number.isFinite(v)) return v;
-  if (typeof v === "string") {
-    const n = Number(v.trim());
-    if (Number.isFinite(n)) return n;
-  }
-  return null;
-}
-
-function getIncidentTypeCode(i: ApiIncident): number | null {
-  return (
-    asNumber(i.incident_type_code) ??
-    asNumber(i.neris_incident_type_code) ??
-    asNumber(i.incident_type) ??
-    null
-  );
-}
-
-function classifyIncident(i: ApiIncident): IncidentCategoryKey {
-  const code = getIncidentTypeCode(i);
-  if (code == null) return "unknown";
-
-  if (code >= 111 && code <= 118) return "structure";
-  if (code >= 130 && code <= 138) return "vehicle";
-  if (code >= 140 && code <= 170) return "outside";
-
-  return "other";
-}
-
-function categoryMeta(key: IncidentCategoryKey) {
-  switch (key) {
-    case "structure":
-      return {
-        label: "Structure Fire",
-        dot: "bg-red-500",
-        pill: "border-red-500/30 bg-red-500/10 text-red-200",
-        hex: "#ef4444",
-      };
-    case "vehicle":
-      return {
-        label: "Vehicle Fire",
-        dot: "bg-orange-500",
-        pill: "border-orange-500/30 bg-orange-500/10 text-orange-200",
-        hex: "#f97316",
-      };
-    case "outside":
-      return {
-        label: "Outside Fire",
-        dot: "bg-yellow-400",
-        pill: "border-yellow-400/30 bg-yellow-400/10 text-yellow-100",
-        hex: "#facc15",
-      };
-    case "other":
-      return {
-        label: "Other",
-        dot: "bg-blue-500",
-        pill: "border-blue-500/30 bg-blue-500/10 text-blue-200",
-        hex: "#3b82f6",
-      };
-    default:
-      return {
-        label: "Unknown",
-        dot: "bg-slate-400",
-        pill: "border-slate-500/30 bg-slate-500/10 text-slate-200",
-        hex: "#94a3b8",
-      };
-  }
-}
-
-function CategoryPill({ incident }: { incident: ApiIncident }) {
-  const key = classifyIncident(incident);
-  const meta = categoryMeta(key);
-  const code = getIncidentTypeCode(incident);
-
-  return (
-    <span
-      className={cn(
-        "inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-[11px] font-semibold",
-        meta.pill
-      )}
-      title="Category coloring (not severity or cause)"
-    >
-      <span className={cn("h-2 w-2 rounded-full", meta.dot)} />
-      {meta.label}
-      {code != null ? <span className="font-mono text-[10px] opacity-80">({code})</span> : null}
-    </span>
-  );
-}
-
-function timeRangeLabel(key: TimeRangeKey) {
-  switch (key) {
-    case "30":
-      return "Last 30 days";
-    case "90":
-      return "Last 90 days";
-    case "365":
-      return "Last 365 days";
-    default:
-      return "All time";
-  }
-}
-
-function timeRangeDays(key: TimeRangeKey): number | null {
-  if (key === "30") return 30;
-  if (key === "90") return 90;
-  if (key === "365") return 365;
-  return null;
-}
-
-function TimeFilterChips({
-  value,
-  onChange,
-}: {
-  value: TimeRangeKey;
-  onChange: (v: TimeRangeKey) => void;
-}) {
-  const options: TimeRangeKey[] = ["all", "30", "90", "365"];
-
-  return (
-    <div className="flex flex-wrap gap-2">
-      {options.map((k) => {
-        const active = value === k;
-        return (
-          <button
-            key={k}
-            type="button"
-            className={cn(
-              "rounded-full border px-3 py-1 text-[11px] font-semibold",
-              active
-                ? "border-orange-400/60 bg-orange-500/10 text-orange-200"
-                : "border-slate-800 bg-slate-950/30 text-slate-300 hover:border-orange-400/40 hover:text-orange-200"
-            )}
-            onClick={() => onChange(k)}
-            aria-pressed={active}
-            title={timeRangeLabel(k)}
-          >
-            {k === "all" ? "All" : `${k}d`}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-function typeFilterLabel(key: TypeFilterKey) {
-  if (key === "all") return "All categories";
-  return categoryMeta(key).label;
-}
-
-function TypeFilterChips({
-  value,
-  onChange,
-}: {
-  value: TypeFilterKey;
-  onChange: (v: TypeFilterKey) => void;
-}) {
-  const options: TypeFilterKey[] = ["all", "structure", "vehicle", "outside", "other", "unknown"];
-
-  return (
-    <div className="flex flex-wrap gap-2">
-      {options.map((k) => {
-        const active = value === k;
-
-        const pill =
-          k === "all"
-            ? active
-              ? "border-orange-400/60 bg-orange-500/10 text-orange-200"
-              : "border-slate-800 bg-slate-950/30 text-slate-300 hover:border-orange-400/40 hover:text-orange-200"
-            : active
-              ? cn(categoryMeta(k).pill, "border-orange-400/30")
-              : "border-slate-800 bg-slate-950/30 text-slate-300 hover:border-orange-400/40 hover:text-orange-200";
-
-        const label = k === "all" ? "All" : categoryMeta(k).label.split(" ")[0];
-
-        return (
-          <button
-            key={k}
-            type="button"
-            className={cn("rounded-full border px-3 py-1 text-[11px] font-semibold", pill)}
-            onClick={() => onChange(k)}
-            aria-pressed={active}
-            title={typeFilterLabel(k)}
-          >
-            {label}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-function MapModeToggle({ value, onChange }: { value: MapMode; onChange: (v: MapMode) => void }) {
-  return (
-    <div className="inline-flex overflow-hidden rounded-full border border-slate-800 bg-slate-950/30">
-      {(["pins", "hotspots"] as MapMode[]).map((m) => {
-        const active = value === m;
-        return (
-          <button
-            key={m}
-            type="button"
-            className={cn(
-              "px-3 py-1.5 text-[11px] font-semibold",
-              active ? "bg-orange-500/10 text-orange-200" : "text-slate-300 hover:text-orange-200"
-            )}
-            onClick={() => onChange(m)}
-            aria-pressed={active}
-            title={m === "pins" ? "Show incident pins" : "Show hotspot circles"}
-          >
-            {m === "pins" ? "Pins" : "Hotspots"}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-function buildQueryFromIncident(i: ApiIncident) {
-  const parts = [i.address, i.city, i.state].filter(Boolean) as string[];
-  return parts.join(", ");
-}
-
-function buildDeptQuery(dept: Department) {
-  const parts = [dept.city, dept.state].filter(Boolean) as string[];
-  return parts.join(", ");
-}
-
-function osmSearchUrl(query: string) {
-  return `https://www.openstreetmap.org/search?query=${encodeURIComponent(query)}`;
-}
-
-async function geocodeToPoint(query: string): Promise<GeoPoint | null> {
-  const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=${encodeURIComponent(query)}`;
-  const res = await fetch(url, { cache: "no-store" });
-  if (!res.ok) return null;
-
-  const data = (await res.json()) as Array<{ lat: string; lon: string }>;
-  if (!Array.isArray(data) || data.length === 0) return null;
-
-  const lat = Number(data[0].lat);
-  const lon = Number(data[0].lon);
-  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
-
-  return { lat, lon };
-}
-
-function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-function getIncidentTimestampIso(i: ApiIncident): string | null {
-  return i.occurred_at ?? i.created_at ?? null;
-}
-
-function isWithinLastNDays(i: ApiIncident, days: number, nowMs: number): boolean {
-  const iso = getIncidentTimestampIso(i);
-  if (!iso) return false;
-  const t = new Date(iso).getTime();
-  if (!Number.isFinite(t)) return false;
-  const cutoff = nowMs - days * 24 * 60 * 60 * 1000;
-  return t >= cutoff;
-}
-
-function byMostRecent(a: ApiIncident, b: ApiIncident) {
-  const da = new Date(getIncidentTimestampIso(a) ?? 0).getTime();
-  const db = new Date(getIncidentTimestampIso(b) ?? 0).getTime();
-  return db - da;
-}
-
-function haversineMeters(a: GeoPoint, b: GeoPoint) {
-  const R = 6371000;
-  const toRad = (x: number) => (x * Math.PI) / 180;
-
-  const dLat = toRad(b.lat - a.lat);
-  const dLon = toRad(b.lon - a.lon);
-
-  const lat1 = toRad(a.lat);
-  const lat2 = toRad(b.lat);
-
-  const s1 = Math.sin(dLat / 2);
-  const s2 = Math.sin(dLon / 2);
-
-  const h = s1 * s1 + Math.cos(lat1) * Math.cos(lat2) * s2 * s2;
-  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
-}
-
-function computeClusters(pins: IncidentPin[], thresholdMeters: number): HotspotCluster[] {
-  const clusters: HotspotCluster[] = [];
-  const used = new Array(pins.length).fill(false);
-
-  for (let i = 0; i < pins.length; i++) {
-    if (used[i]) continue;
-
-    const seed = pins[i];
-    const group: IncidentPin[] = [seed];
-    used[i] = true;
-
-    let center: GeoPoint = { ...seed.point };
-    let changed = true;
-
-    while (changed) {
-      changed = false;
-
-      for (let j = 0; j < pins.length; j++) {
-        if (used[j]) continue;
-
-        const p = pins[j];
-        const d = haversineMeters(center, p.point);
-
-        if (d <= thresholdMeters) {
-          used[j] = true;
-          group.push(p);
-
-          const avgLat = group.reduce((s, x) => s + x.point.lat, 0) / group.length;
-          const avgLon = group.reduce((s, x) => s + x.point.lon, 0) / group.length;
-          center = { lat: avgLat, lon: avgLon };
-
-          changed = true;
-        }
-      }
-    }
-
-    const counts: Record<IncidentCategoryKey, number> = {
-      structure: 0,
-      vehicle: 0,
-      outside: 0,
-      other: 0,
-      unknown: 0,
-    };
-    for (const p of group) counts[classifyIncident(p.incident)]++;
-
-    const dominantCategory = (Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0] ??
-      "unknown") as IncidentCategoryKey;
-
-    clusters.push({
-      id: `cluster-${i}-${group.length}`,
-      center,
-      count: group.length,
-      pins: group,
-      dominantCategory,
-    });
-  }
-
-  return clusters.sort((a, b) => b.count - a.count);
-}
+// -----------------------------
+// Leaflet map (loaded via CDN for demo simplicity)
+// -----------------------------
 
 /**
- * Map with optional external "focus center" (for Top Hotspots Select)
- * This avoids refactoring: we just accept a point and setView when it changes.
+ * Map with optional external "focus center" (for Top Hotspots Select).
+ * Avoids refactors: accept a point and setView when it changes.
  */
 function HotspotLeafletMap({
   center,
@@ -754,6 +818,7 @@ function HotspotLeafletMap({
     };
   }, []);
 
+  // Init map
   useEffect(() => {
     if (!leafletReady) return;
     if (!mapDivRef.current) return;
@@ -768,49 +833,43 @@ function HotspotLeafletMap({
     const initialCenter: [number, number] = center ? [center.lat, center.lon] : [39.8283, -98.5795];
     const initialZoom = center ? 12 : 4;
 
-    const map = L.map(mapDivRef.current, { zoomControl: true, attributionControl: true }).setView(
-      initialCenter,
-      initialZoom
-    );
+    const map = L.map(mapDivRef.current, {
+      zoomControl: true,
+      attributionControl: true,
+    }).setView(initialCenter, initialZoom);
 
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      attribution: "&copy; OpenStreetMap contributors",
+      // OSM tiles
       maxZoom: 19,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
     }).addTo(map);
 
     const layer = L.layerGroup().addTo(map);
-
     mapRef.current = map;
     layerRef.current = layer;
-
-    return () => {
-      try {
-        map.remove();
-      } catch {}
-      mapRef.current = null;
-      layerRef.current = null;
-    };
   }, [leafletReady, center]);
 
+  // Focus center (Top Hotspots select)
   useEffect(() => {
     if (!leafletReady) return;
     const map = mapRef.current;
     if (!map) return;
+    if (!focusCenter) return;
 
-    // Prefer focusing on a selected hotspot center if provided
-    const target = focusCenter ?? center;
-    if (!target) return;
+    try {
+      map.setView([focusCenter.lat, focusCenter.lon], Math.max(map.getZoom(), 14), { animate: true });
+    } catch {
+      // ignore
+    }
+  }, [leafletReady, focusCenter]);
 
-    map.setView([target.lat, target.lon], Math.max(map.getZoom(), focusCenter ? 14 : 12), { animate: true });
-  }, [leafletReady, center, focusCenter]);
-
+  // Render markers/circles
   useEffect(() => {
     if (!leafletReady) return;
-
-    const L = (window as any).L;
     const map = mapRef.current;
     const layer = layerRef.current;
-    if (!L || !map || !layer) return;
+    const L = (window as any).L;
+    if (!map || !layer || !L) return;
 
     layer.clearLayers();
 
@@ -818,63 +877,57 @@ function HotspotLeafletMap({
 
     if (mode === "pins") {
       for (const p of pins) {
-        const meta = categoryMeta(classifyIncident(p.incident));
-
-        const icon = L.divIcon({
-          className: "",
-          html: `
-            <div style="
-              width: 14px; height: 14px;
-              border-radius: 9999px;
-              background: ${meta.hex};
-              border: 2px solid rgba(15, 23, 42, 0.85);
-              box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.12);
-            "></div>
-          `,
-          iconSize: [14, 14],
-          iconAnchor: [7, 7],
+        const meta = categoryMeta(p.categoryKey);
+        const marker = L.circleMarker([p.lat, p.lon], {
+          radius: 7,
+          color: meta.pinColor,
+          weight: 2,
+          fillColor: meta.pinColor,
+          fillOpacity: 0.9,
         });
 
-        const marker = L.marker([p.point.lat, p.point.lon], { icon });
+        const when = p.occurredAt ? fmtLocalUtc(p.occurredAt).local : "—";
+        marker.bindPopup(`
+          <div style="font-size:12px; line-height: 1.25;">
+            <div style="font-weight:700; margin-bottom:4px;">${p.label}</div>
+            <div style="opacity:0.85; margin-bottom:2px;">${p.addressLine}</div>
+            <div style="opacity:0.75;">${when}</div>
+          </div>
+        `);
+
         marker.on("click", () => {
-          window.location.href = `/incidents/${p.incidentId}?departmentId=${departmentId}`;
+          // Let Next handle routing; we just open popup.
         });
-        marker.addTo(layer);
 
-        bounds.push([p.point.lat, p.point.lon]);
+        marker.addTo(layer);
+        bounds.push([p.lat, p.lon]);
       }
     } else {
       for (const c of clusters) {
         const meta = categoryMeta(c.dominantCategory);
-        const radiusMeters = Math.min(700, 120 + c.count * 70);
-
         const circle = L.circle([c.center.lat, c.center.lon], {
-          radius: radiusMeters,
-          color: meta.hex,
+          radius: c.radiusMeters,
+          color: meta.pinColor,
           weight: 2,
-          fillColor: meta.hex,
-          fillOpacity: 0.18,
+          fillColor: meta.pinColor,
+          fillOpacity: 0.16,
         });
 
+        // Label badge (count)
         const label = L.marker([c.center.lat, c.center.lon], {
           interactive: true,
-          keyboard: false,
           icon: L.divIcon({
             className: "",
-            html: `
-              <div style="
-                display:flex; align-items:center; justify-content:center;
-                width: 28px; height: 28px;
-                border-radius: 9999px;
-                background: rgba(15,23,42,0.75);
-                border: 2px solid ${meta.hex};
-                color: #e2e8f0;
-                font-weight: 800;
-                font-size: 12px;
-                box-shadow: 0 6px 20px rgba(0,0,0,0.35);
-                cursor: pointer;
-              ">${c.count}</div>
-            `,
+            html: `<div style="
+              width:28px; height:28px; border-radius:999px;
+              display:flex; align-items:center; justify-content:center;
+              border:2px solid ${meta.pinColor};
+              background: rgba(2,6,23,0.80);
+              color: #e2e8f0;
+              font-weight: 800;
+              font-size: 12px;
+              box-shadow: 0 6px 18px rgba(0,0,0,0.35);
+            ">${c.count}</div>`,
             iconSize: [28, 28],
             iconAnchor: [14, 14],
           }),
@@ -907,14 +960,16 @@ function HotspotLeafletMap({
       }
     }
 
-    // Keep fitBounds behavior for initial render only-ish: if no focusCenter set.
+    // Fit to data if no focusCenter
     if (!focusCenter) {
       if (bounds.length >= 2) {
         try {
           map.fitBounds(bounds, { padding: [20, 20] });
         } catch {}
       } else if (bounds.length === 1) {
-        map.setView(bounds[0], mode === "pins" ? 14 : 13, { animate: true });
+        try {
+          map.setView(bounds[0], mode === "pins" ? 14 : 13, { animate: true });
+        } catch {}
       }
     }
   }, [leafletReady, pins, clusters, departmentId, mode, onHotspotClick, focusCenter]);
@@ -929,6 +984,10 @@ function HotspotLeafletMap({
 
   return <div ref={mapDivRef} className="h-80 w-full" aria-label="Interactive hotspot map" />;
 }
+
+// -----------------------------
+// Page
+// -----------------------------
 
 export default function DepartmentDetailPage() {
   const params = useParams<{ id: string }>();
@@ -978,6 +1037,7 @@ export default function DepartmentDetailPage() {
     }, 50);
   }
 
+  // Load dept + incidents from backend
   useEffect(() => {
     let cancelled = false;
 
@@ -1004,8 +1064,8 @@ export default function DepartmentDetailPage() {
       try {
         const deptRes = await fetch(`${apiBase}/api/v1/departments/${deptId}`, { cache: "no-store" });
         if (!deptRes.ok) {
-          const text = await deptRes.text().catch(() => "");
-          throw new Error(`Failed to load department (${deptRes.status}). ${text}`);
+          const t = await deptRes.text().catch(() => "");
+          throw new Error(`Failed to load department (${deptRes.status}). ${t}`);
         }
 
         const d = (await safeJson(deptRes)) as any;
@@ -1024,24 +1084,36 @@ export default function DepartmentDetailPage() {
         }
 
         setStatusMsg("Loading incidents…");
-
-        const incRes = await fetch(`${apiBase}/api/v1/departments/${deptId}/incidents/`, { cache: "no-store" });
+        const incRes = await fetch(`${apiBase}/api/v1/incidents?department_id=${deptId}`, { cache: "no-store" });
         if (!incRes.ok) {
-          const text = await incRes.text().catch(() => "");
-          throw new Error(`Failed to load incidents (${incRes.status}). ${text}`);
+          const t = await incRes.text().catch(() => "");
+          throw new Error(`Failed to load incidents (${incRes.status}). ${t}`);
         }
+        const data = (await safeJson(incRes)) as any;
 
-        const incJson = await safeJson(incRes);
-        const items = Array.isArray((incJson as any)?.items) ? (incJson as any).items : incJson;
+        const list: ApiIncident[] = Array.isArray(data)
+          ? data.map((x: any) => ({
+              id: Number(x.id),
+              occurred_at: x.occurred_at ?? null,
+              address: x.address ?? null,
+              city: x.city ?? null,
+              state: x.state ?? null,
+              department_id: Number(x.department_id),
+              neris_incident_id: x.neris_incident_id ?? null,
+              incident_type_code: x.incident_type_code ?? null,
+            }))
+          : [];
 
-        const list: ApiIncident[] = Array.isArray(items) ? items : [];
-        if (!cancelled) setIncidents(list.slice().sort(byMostRecent));
-      } catch (e: any) {
-        if (!cancelled) setError(e?.message ?? "Failed to load department.");
-      } finally {
         if (!cancelled) {
-          setLoading(false);
+          setIncidents(list);
           setStatusMsg(null);
+          setLoading(false);
+        }
+      } catch (e: any) {
+        if (!cancelled) {
+          setError(e?.message ?? "Unknown error");
+          setStatusMsg(null);
+          setLoading(false);
         }
       }
     }
@@ -1052,79 +1124,93 @@ export default function DepartmentDetailPage() {
     };
   }, [apiBase, deptId, idStr, isValidId]);
 
-  const categoryFilteredAllTime = useMemo(() => {
-    if (typeFilter === "all") return incidents;
-    return incidents.filter((i) => classifyIncident(i) === typeFilter);
+  // Apply time + type filters
+  const filteredIncidents = useMemo(() => {
+    const start = rangeStartDate(timeRange);
+    return incidents.filter((i) => {
+      if (typeFilter !== "all") {
+        const c = classifyIncident(i);
+        if (c !== typeFilter) return false;
+      }
+      if (start) {
+        const ts = i.occurred_at ? new Date(i.occurred_at).getTime() : NaN;
+        if (!Number.isFinite(ts)) return false;
+        if (ts < start.getTime()) return false;
+      }
+      return true;
+    });
+  }, [incidents, timeRange, typeFilter]);
+
+  // Trend counts (simple for demo)
+  const count30 = useMemo(() => {
+    const start = rangeStartDate("30")!;
+    return incidents.filter((i) => {
+      if (typeFilter !== "all" && classifyIncident(i) !== typeFilter) return false;
+      const ts = i.occurred_at ? new Date(i.occurred_at).getTime() : NaN;
+      if (!Number.isFinite(ts)) return false;
+      return ts >= start.getTime();
+    }).length;
   }, [incidents, typeFilter]);
 
-  const count30 = useMemo(() => {
-    const now = Date.now();
-    return categoryFilteredAllTime.filter((i) => isWithinLastNDays(i, 30, now)).length;
-  }, [categoryFilteredAllTime]);
-
   const count90 = useMemo(() => {
-    const now = Date.now();
-    return categoryFilteredAllTime.filter((i) => isWithinLastNDays(i, 90, now)).length;
-  }, [categoryFilteredAllTime]);
+    const start = rangeStartDate("90")!;
+    return incidents.filter((i) => {
+      if (typeFilter !== "all" && classifyIncident(i) !== typeFilter) return false;
+      const ts = i.occurred_at ? new Date(i.occurred_at).getTime() : NaN;
+      if (!Number.isFinite(ts)) return false;
+      return ts >= start.getTime();
+    }).length;
+  }, [incidents, typeFilter]);
 
-  const timeFilteredIncidents = useMemo(() => {
-    const days = timeRangeDays(timeRange);
-    if (!days) return incidents;
-    const nowMs = Date.now();
-    return incidents.filter((i) => isWithinLastNDays(i, days, nowMs));
-  }, [incidents, timeRange]);
-
-  const filteredIncidents = useMemo(() => {
-    if (typeFilter === "all") return timeFilteredIncidents;
-    return timeFilteredIncidents.filter((i) => classifyIncident(i) === typeFilter);
-  }, [timeFilteredIncidents, typeFilter]);
-
+  // Geocode department and incidents (demo-safe)
   useEffect(() => {
-    if (!dept) return;
-
-    const deptQuery = buildDeptQuery(dept);
-    const incidentCandidates = filteredIncidents
-      .filter((i) => Boolean(i.address || i.city || i.state))
-      .slice(0, 20);
-
     let cancelled = false;
+    const controller = new AbortController();
 
-    (async () => {
+    async function run() {
+      if (!dept) return;
+
       setMapLoading(true);
-      setMapNote("Geocoding map points…");
-      setSelectedCluster(null);
-      setFocusCenter(null);
+      setMapNote("Geocoding…");
 
       try {
-        if (deptQuery) {
-          const center = await geocodeToPoint(deptQuery);
-          if (!cancelled) setDeptCenter(center);
-        }
+        // Dept center
+        const deptQ = buildDeptQuery(dept);
+        const deptP = deptQ ? await geocodeAddress(deptQ, controller.signal) : null;
+        if (!cancelled) setDeptCenter(deptP);
+
+        // Incident pins (limit to reduce rate-limit risk)
+        const toGeocode = filteredIncidents.slice(0, 40);
 
         const builtPins: IncidentPin[] = [];
-        for (const i of incidentCandidates) {
+        for (const inc of toGeocode) {
           if (cancelled) break;
 
-          const q = buildQueryFromIncident(i);
+          const q = incidentAddressLine(inc);
           if (!q) continue;
 
-          const pt = await geocodeToPoint(q);
-          if (pt) {
-            builtPins.push({
-              incidentId: i.id,
-              label: i.neris_incident_id ? String(i.neris_incident_id) : `Incident #${i.id}`,
-              locationText: q,
-              occurredAt: getIncidentTimestampIso(i),
-              point: pt,
-              incident: i,
-            });
-          }
+          const p = await geocodeAddress(q, controller.signal);
+          if (!p) continue;
 
-          await sleep(350);
+          const cKey = typeFilter === "all" ? classifyIncident(inc) : typeFilter;
+
+          builtPins.push({
+            incidentId: inc.id,
+            label: `Incident #${inc.id}`,
+            addressLine: q,
+            occurredAt: inc.occurred_at,
+            lat: p.lat,
+            lon: p.lon,
+            categoryKey: cKey,
+          });
+
+          // small delay for politeness (demo)
+          await new Promise((r) => setTimeout(r, 120));
         }
 
         if (!cancelled) {
           setPins(builtPins);
+
           const filterText = typeFilter === "all" ? "All categories" : categoryMeta(typeFilter).label;
 
           setMapNote(
@@ -1138,10 +1224,13 @@ export default function DepartmentDetailPage() {
       } finally {
         if (!cancelled) setMapLoading(false);
       }
-    })();
+    }
+
+    run();
 
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [dept, filteredIncidents, timeRange, typeFilter]);
 
@@ -1190,6 +1279,12 @@ export default function DepartmentDetailPage() {
       document.getElementById("hotspot-map-anchor")?.scrollIntoView({ behavior: "smooth", block: "start" });
     } catch {}
   }
+
+  const cityState = dept ? [dept.city, dept.state].filter(Boolean).join(", ") : "";
+
+  // -----------------------------
+  // Render
+  // -----------------------------
 
   return (
     <section className="space-y-4">
@@ -1277,177 +1372,131 @@ export default function DepartmentDetailPage() {
           </div>
         </div>
 
-        <div className="print-card print-avoid-break" style={{ marginTop: 12 }}>
-          <h3>Top hotspot</h3>
-          {topCluster ? (
-            <>
-              <div className="print-note">
-                <strong>{topCluster.count}</strong> incident(s) • Dominant category:{" "}
-                <strong>{categoryMeta(topCluster.dominantCategory).label}</strong>
-              </div>
-              <div className="print-note">Hotspot location is approximate and based on geocoded preview pins.</div>
-            </>
-          ) : (
-            <div className="print-note">No hotspots computed for current mapped subset.</div>
-          )}
-        </div>
-
-        <div className="print-card print-avoid-break" style={{ marginTop: 12 }}>
-          <h3>Hotspot drilldown</h3>
-          {selectedCluster ? (
-            <>
-              <div className="print-note">
-                Selected hotspot: <strong>{selectedCluster.count}</strong> incident(s) • Dominant:{" "}
-                <strong>{categoryMeta(selectedCluster.dominantCategory).label}</strong>
-              </div>
-
-              <div className="print-list">
-                {drilldownPins.slice(0, 12).map((p) => {
-                  const dt = fmtLocalUtc(p.occurredAt ?? null);
-                  return (
-                    <div key={p.incidentId} className="print-row">
-                      <div>
-                        <div className="print-k">Date</div>
-                        <div className="print-v">{dt.local}</div>
-                      </div>
-                      <div>
-                        <div className="print-k">Incident</div>
-                        <div className="print-v">
-                          {p.label} • {categoryMeta(classifyIncident(p.incident)).label}
-                        </div>
-                        <div className="print-k" style={{ marginTop: 2 }}>
-                          {p.locationText}
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-
-              {drilldownPins.length > 12 ? (
-                <div className="print-note">Showing 12 of {drilldownPins.length} incident(s) in this hotspot.</div>
-              ) : null}
-            </>
-          ) : (
-            <>
-              <div className="print-note">No hotspot selected. Tip: select a hotspot to include drilldown details.</div>
-              {topHotspots.length > 0 ? (
-                <div className="print-note">
-                  Top hotspots (mapped):{" "}
-                  {topHotspots
-                    .map((h) => `${h.count} (${categoryMeta(h.dominantCategory).label})`)
-                    .join(" • ")}
-                </div>
-              ) : null}
-            </>
-          )}
+        <div className="print-list">
+          <div className="print-row">
+            <div className="print-k">Top hotspot</div>
+            <div className="print-v">
+              {topCluster ? `${topCluster.count} incidents (dominant: ${categoryMeta(topCluster.dominantCategory).label})` : "—"}
+            </div>
+          </div>
+          <div className="print-row">
+            <div className="print-k">NFPA note</div>
+            <div className="print-v">
+              Hotspots indicate density patterns for triage and planning — not cause/origin/conclusions (NFPA-aligned discipline).
+            </div>
+          </div>
         </div>
 
         <div className="print-footer">
-          NFPA-aligned note: Hotspots represent density patterns for triage and resource planning. They do not imply
-          cause, origin, responsibility, or investigative conclusions. Use NFPA 921 / 1033 discipline for conclusions.
+          Demo artifact. Future versions will add validated NERIS mappings, confidence scoring, and export packages for grant and CRR workflows.
         </div>
       </div>
 
-      {/* Screen UI */}
-      <div className="no-print">
-        <div className="flex items-center justify-between">
+      <div className="no-print space-y-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h1 className="text-2xl font-semibold text-orange-400">Department</h1>
-            <p className="text-xs text-slate-300">
-              Dept ID: <span className="text-slate-100">{idStr}</span>
-            </p>
+            <div className="text-xl font-semibold text-slate-100">
+              {dept ? dept.name : "Department"}
+              {cityState ? <span className="text-slate-400"> • {cityState}</span> : null}
+            </div>
+            <div className="mt-1 text-sm text-slate-400">
+              Department ID <span className="font-mono text-slate-200">{deptId}</span>
+              {dept?.neris_department_id ? (
+                <>
+                  {" "}
+                  • NERIS Dept ID <span className="font-mono text-slate-200">{dept.neris_department_id}</span>
+                </>
+              ) : null}
+            </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <Link
+              href="/dashboard"
+              className="rounded-md border border-slate-800 bg-slate-950/20 px-3 py-2 text-xs font-semibold text-slate-100 hover:border-orange-400"
+            >
+              ← Back to Dashboard
+            </Link>
+
+            {deptMapLink ? (
+              <a
+                href={deptMapLink}
+                target="_blank"
+                rel="noreferrer"
+                className="rounded-md border border-slate-800 bg-slate-950/20 px-3 py-2 text-xs font-semibold text-slate-100 hover:border-orange-400"
+                title="Open in OpenStreetMap"
+              >
+                Open in OSM ↗
+              </a>
+            ) : null}
+
             <button
               type="button"
               onClick={exportBrief}
-              className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-100 hover:border-orange-400"
-              title="Opens the browser Print dialog (choose Save as PDF)"
+              className="rounded-md bg-orange-600 px-3 py-2 text-xs font-semibold text-white hover:bg-orange-500"
+              title="Print / Export brief"
             >
-              Export Hotspot Brief (Print/PDF)
+              Export Brief (PDF)
             </button>
-
-            <Link
-              href="/departments"
-              className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100 hover:border-orange-400"
-            >
-              ← Back to Departments
-            </Link>
           </div>
         </div>
 
-        <div className="text-[11px] text-slate-500">
-          Backend: <span className="text-slate-300">{apiBase}</span>
-        </div>
-
-        {loading && (
-          <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-4">
-            <p className="text-xs text-slate-300">{statusMsg ?? "Loading…"}</p>
+        {error ? (
+          <div className="rounded-lg border border-red-900/40 bg-red-950/40 p-4 text-sm text-red-100">
+            <div className="font-semibold">Error</div>
+            <div className="mt-1 text-red-200">{error}</div>
           </div>
-        )}
+        ) : null}
 
-        {error && !loading && (
-          <div className="rounded-lg border border-red-900/50 bg-red-950/30 p-4">
-            <p className="text-xs text-red-300 whitespace-pre-wrap">{error}</p>
+        {loading ? (
+          <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4 text-sm text-slate-200">
+            {statusMsg ?? "Loading…"}
           </div>
-        )}
+        ) : null}
 
-        {!loading && dept && (
+        {!loading && dept ? (
           <>
-            <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-4">
-              <div className="text-lg font-semibold text-slate-100">{dept.name}</div>
-              <div className="mt-1 text-xs text-slate-300">
-                {[dept.city, dept.state].filter(Boolean).join(", ") || "—"}{" "}
-                {dept.neris_department_id ? (
-                  <>
-                    · <span className="text-slate-400">NERIS ID:</span>{" "}
-                    <span className="text-slate-100">{dept.neris_department_id}</span>
-                  </>
-                ) : null}
+            <div className="grid gap-4 md:grid-cols-3">
+              <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
+                <div className="text-[10px] uppercase tracking-wide text-slate-400">Incidents</div>
+                <div className="mt-1 text-2xl font-extrabold text-slate-100">{totalIncidents}</div>
+                <div className="mt-1 text-xs text-slate-400">Total incidents loaded</div>
               </div>
 
-              <div className="mt-4 flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100 hover:border-orange-400"
-                  onClick={resetFilters}
-                >
-                  Reset filters
-                </button>
+              <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
+                <div className="text-[10px] uppercase tracking-wide text-slate-400">Filtered view</div>
+                <div className="mt-1 text-2xl font-extrabold text-slate-100">{showingIncidents}</div>
+                <div className="mt-1 text-xs text-slate-400">{activeFiltersText}</div>
+              </div>
 
-                {deptMapLink ? (
-                  <a
-                    className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100 hover:border-orange-400"
-                    href={deptMapLink}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    Open map →
-                  </a>
-                ) : null}
+              <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
+                <div className="text-[10px] uppercase tracking-wide text-slate-400">Mapped pins</div>
+                <div className="mt-1 text-2xl font-extrabold text-slate-100">{pins.length}</div>
+                <div className="mt-1 text-xs text-slate-400">Geocoded incident address subset (demo)</div>
               </div>
             </div>
 
-            {/* ✅ AI Assist panel (NEW) */}
+            {/* AI Assist panel (AFG/SAFER/CRR) */}
             <GrantNarrativePanel
               departmentName={dept.name}
-              city={dept.city ?? ""}
-              state={dept.state ?? ""}
+              cityState={cityState}
               timeWindowLabel={timeRangeLabel(timeRange)}
+              categoriesLabel={typeFilter === "all" ? "All categories" : categoryMeta(typeFilter).label}
               mappedIncidentsCount={pins.length}
               hotspotsCount={clusters.length}
-              categoriesLabel={typeFilterLabel(typeFilter)}
+              topHotspotCount={clusters[0]?.count ?? 0}
+              trend30={count30}
+              trend90={count90}
             />
 
+            {/* Map panel */}
             <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
               <div className="flex items-start justify-between gap-3">
                 <div>
                   <div className="text-sm font-semibold text-slate-100">NERIS Hotspot Intelligence Map</div>
                   <div className="mt-1 text-[11px] text-slate-400">
-                    Hotspots indicate <span className="text-slate-200">density patterns</span> for triage and planning —
-                    not cause/origin/conclusions (NFPA-aligned discipline).
+                    Hotspots indicate <span className="text-slate-200">density patterns</span> for triage and planning — not
+                    cause/origin/conclusions (NFPA-aligned discipline).
                   </div>
                 </div>
 
@@ -1481,6 +1530,21 @@ export default function DepartmentDetailPage() {
                     <div className="mt-1 text-[11px] text-slate-300">Active: {activeFiltersText}</div>
                   </div>
                   <TypeFilterChips value={typeFilter} onChange={setTypeFilter} />
+                </div>
+
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="text-[11px] text-slate-500">
+                    <span className="text-slate-200 font-semibold">Pin colors:</span>{" "}
+                    Fire (red), EMS (green), HazMat (purple), Service (blue), False Alarm (amber), Other (gray).
+                  </div>
+                  <button
+                    type="button"
+                    className="rounded-md border border-slate-800 bg-slate-950/30 px-3 py-2 text-xs font-semibold text-slate-100 hover:border-orange-400"
+                    onClick={resetFilters}
+                    title="Reset to defaults"
+                  >
+                    Reset
+                  </button>
                 </div>
               </div>
 
@@ -1517,9 +1581,7 @@ export default function DepartmentDetailPage() {
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <div className="text-[10px] uppercase tracking-wide text-slate-400">Top hotspots (mapped)</div>
-                      <div className="mt-1 text-[11px] text-slate-500">
-                        Ranked by incident count. Select to zoom + open drilldown.
-                      </div>
+                      <div className="mt-1 text-[11px] text-slate-500">Ranked by incident count. Select to zoom + open drilldown.</div>
                     </div>
                     {selectedCluster ? (
                       <button
@@ -1536,136 +1598,95 @@ export default function DepartmentDetailPage() {
                     ) : null}
                   </div>
 
-                  {topHotspots.length === 0 ? (
-                    <div className="mt-2 text-xs text-slate-300">
-                      No hotspots computed yet (try All categories or expand the time window).
-                    </div>
-                  ) : (
-                    <div className="mt-3 grid gap-2 sm:grid-cols-3">
-                      {topHotspots.map((h, idx) => {
-                        const selected = selectedCluster?.id === h.id;
-                        const meta = categoryMeta(h.dominantCategory);
-
+                  <div className="mt-3 grid gap-2 md:grid-cols-3">
+                    {topHotspots.length === 0 ? (
+                      <div className="text-xs text-slate-400">No hotspots available yet (need at least 2 mapped pins nearby).</div>
+                    ) : (
+                      topHotspots.map((c) => {
+                        const meta = categoryMeta(c.dominantCategory);
+                        const active = selectedCluster?.id === c.id;
                         return (
                           <button
-                            key={h.id}
+                            key={c.id}
                             type="button"
-                            onClick={() => selectHotspot(h)}
+                            onClick={() => selectHotspot(c)}
                             className={cn(
-                              "text-left rounded-md border p-3 transition",
-                              selected
-                                ? "border-orange-400/70 bg-orange-500/10"
-                                : "border-slate-800 bg-slate-950/30 hover:border-orange-400/40"
+                              "rounded-md border p-3 text-left",
+                              active ? "border-orange-400/60 bg-orange-500/10" : "border-slate-800 bg-slate-950/20 hover:border-slate-700"
                             )}
-                            title="Select hotspot"
+                            title="Zoom to hotspot + open drilldown"
                           >
-                            <div className="flex items-center justify-between gap-2">
-                              <div className="text-xs font-semibold text-slate-100">#{idx + 1} Hotspot</div>
-                              <span
-                                className={cn(
-                                  "inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-[11px] font-semibold",
-                                  meta.pill
-                                )}
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="text-xs font-semibold text-slate-100">Hotspot</div>
+                              <div
+                                className="rounded-full px-2 py-0.5 text-[11px] font-extrabold"
+                                style={{ border: `1px solid ${meta.pinColor}`, color: meta.pinColor }}
                               >
-                                <span className={cn("h-2 w-2 rounded-full", meta.dot)} />
-                                {meta.label}
-                              </span>
+                                {c.count}
+                              </div>
                             </div>
-
-                            <div className="mt-2 flex items-baseline gap-2">
-                              <div className="text-2xl font-extrabold text-slate-100">{h.count}</div>
-                              <div className="text-xs text-slate-400">incidents</div>
-                            </div>
-
-                            <div className="mt-2 text-[11px] text-slate-500">Click to open drilldown + zoom</div>
+                            <div className="mt-1 text-[11px] text-slate-400">Dominant: {meta.label}</div>
+                            <div className="mt-1 text-[11px] text-slate-500">Radius ~{Math.round(c.radiusMeters)}m</div>
                           </button>
                         );
-                      })}
-                    </div>
-                  )}
-                </div>
-              ) : null}
-
-              {mapMode === "hotspots" && selectedCluster ? (
-                <div className="mt-3 rounded-md border border-slate-800 bg-slate-950/20 p-3">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <div className="text-[10px] uppercase tracking-wide text-slate-400">Hotspot drilldown</div>
-                      <div className="mt-1 text-[11px] text-slate-300">
-                        <span className="text-slate-100 font-semibold">{selectedCluster.count}</span> incident(s) •
-                        Dominant:{" "}
-                        <span className="text-slate-100">{categoryMeta(selectedCluster.dominantCategory).label}</span>
-                      </div>
-                    </div>
-
-                    <button
-                      type="button"
-                      className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100 hover:border-orange-400"
-                      onClick={() => {
-                        setSelectedCluster(null);
-                        setFocusCenter(null);
-                      }}
-                    >
-                      Clear
-                    </button>
-                  </div>
-
-                  <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                    {drilldownPins.slice(0, 12).map((p) => (
-                      <Link
-                        key={p.incidentId}
-                        href={`/incidents/${p.incidentId}?departmentId=${dept.id}`}
-                        className="block rounded-md border border-slate-800 bg-slate-950/30 p-3 hover:border-orange-400"
-                        title={p.locationText}
-                      >
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <div className="text-xs font-semibold text-slate-100">{p.label}</div>
-                              <CategoryPill incident={p.incident} />
-                            </div>
-                            <div className="mt-1 truncate text-[11px] text-slate-400">{p.locationText}</div>
-                          </div>
-                          <div className="text-right text-[11px]">
-                            <DateBlock iso={p.occurredAt ?? null} />
-                          </div>
-                        </div>
-                      </Link>
-                    ))}
+                      })
+                    )}
                   </div>
                 </div>
               ) : null}
-
-              <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                {pins.length === 0 ? (
-                  <div className="text-xs text-slate-300">No pinned incidents match the active filters.</div>
-                ) : (
-                  pins.map((p) => (
-                    <Link
-                      key={p.incidentId}
-                      href={`/incidents/${p.incidentId}?departmentId=${dept.id}`}
-                      className="block rounded-md border border-slate-800 bg-slate-950/30 p-3 hover:border-orange-400"
-                      title={p.locationText}
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <div className="text-xs font-semibold text-slate-100">{p.label}</div>
-                            <CategoryPill incident={p.incident} />
-                          </div>
-                          <div className="mt-1 truncate text-[11px] text-slate-400">{p.locationText}</div>
-                        </div>
-                        <div className="text-right text-[11px]">
-                          <DateBlock iso={p.occurredAt ?? null} />
-                        </div>
-                      </div>
-                    </Link>
-                  ))
-                )}
-              </div>
             </div>
+
+            {/* Drilldown panel */}
+            {selectedCluster ? (
+              <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold text-slate-100">Hotspot drilldown</div>
+                    <div className="mt-1 text-[11px] text-slate-400">
+                      {selectedCluster.count} incident(s) • Dominant: {categoryMeta(selectedCluster.dominantCategory).label} • Showing up to 24 most recent
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    className="rounded-md border border-slate-800 bg-slate-950/30 px-3 py-2 text-xs font-semibold text-slate-100 hover:border-orange-400"
+                    onClick={() => {
+                      setSelectedCluster(null);
+                      setFocusCenter(null);
+                    }}
+                    title="Close drilldown"
+                  >
+                    Close
+                  </button>
+                </div>
+
+                <div className="mt-3 grid gap-2 md:grid-cols-2">
+                  {drilldownPins.map((p) => {
+                    const when = p.occurredAt ? fmtLocalUtc(p.occurredAt).local : "—";
+                    const meta = categoryMeta(p.categoryKey);
+                    return (
+                      <Link
+                        key={`${selectedCluster.id}:${p.incidentId}`}
+                        href={`/incidents/${p.incidentId}`}
+                        className="rounded-md border border-slate-800 bg-slate-950/20 p-3 hover:border-orange-400/60"
+                        title="Open incident"
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="text-xs font-semibold text-slate-100">Incident #{p.incidentId}</div>
+                          <div className="text-[11px] font-semibold" style={{ color: meta.pinColor }}>
+                            {meta.label}
+                          </div>
+                        </div>
+                        <div className="mt-1 text-[11px] text-slate-400">{p.addressLine}</div>
+                        <div className="mt-1 text-[11px] text-slate-500">{when}</div>
+                      </Link>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : null}
           </>
-        )}
+        ) : null}
       </div>
     </section>
   );
