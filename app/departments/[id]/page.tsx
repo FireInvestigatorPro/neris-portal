@@ -85,10 +85,16 @@ function cn(...classes: Array<string | false | null | undefined>) {
 }
 
 function getApiBase() {
-  // Same pattern you’ve used elsewhere — keep stable for Vercel.
-  const env = process.env.NEXT_PUBLIC_API_BASE?.trim();
-  if (env) return env.replace(/\/+$/, "");
-  return "";
+  // Prefer the env var you already use elsewhere in the app
+  const fromUrl = process.env.NEXT_PUBLIC_API_BASE_URL?.trim();
+  if (fromUrl) return fromUrl.replace(/\/+$/, "");
+
+  // Back-compat: if you ever used a shorter name
+  const fromBase = process.env.NEXT_PUBLIC_API_BASE?.trim();
+  if (fromBase) return fromBase.replace(/\/+$/, "");
+
+  // Known-good fallback (matches your prior working baseline)
+  return "https://infernointelai-backend.onrender.com";
 }
 
 async function safeJson(res: Response) {
