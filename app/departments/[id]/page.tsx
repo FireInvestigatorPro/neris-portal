@@ -66,6 +66,213 @@ type TimeRangeKey = "all" | "30" | "90" | "365";
 type MapMode = "pins" | "hotspots";
 type TypeFilterKey = "all" | IncidentCategoryKey;
 
+/* =========================
+   AI Assist — Grant Narrative
+   (inline + demo-safe)
+   ========================= */
+
+type GrantMode = "AFG" | "SAFER";
+
+type GrantNarrativeInputs = {
+  departmentName: string;
+  city: string;
+  state: string;
+  timeWindowLabel: string;
+  mappedIncidentsCount: number;
+  hotspotsCount: number;
+  categoriesLabel: string;
+};
+
+function buildAfgNarrative(i: GrantNarrativeInputs) {
+  const place = [i.city, i.state].filter(Boolean).join(", ");
+  const loc = place ? `${i.departmentName} (${place})` : i.departmentName;
+
+  return [
+    `AFG Justification – Draft (Demo “AI Assist”)`,
+    ``,
+    `Department: ${loc}`,
+    `Data window: ${i.timeWindowLabel}`,
+    `Observed activity: ${i.mappedIncidentsCount} mapped incident(s); ${i.hotspotsCount} hotspot cluster(s).`,
+    `Filter: ${i.categoriesLabel}.`,
+    ``,
+    `Problem Statement`,
+    `Recent incident data shows recurring, geographically concentrated call density (“hotspots”) within the ${i.timeWindowLabel} window. This pattern indicates sustained operational demand and elevated risk exposure for responders and the community.`,
+    ``,
+    `Project Purpose`,
+    `InfernoIntelAI NERIS Hotspot Intelligence converts incident records into operationally useful location intelligence—helping leadership prioritize prevention, readiness, and resource planning. This workflow supports disciplined documentation by separating pattern detection from cause/origin conclusions (NFPA 921-aligned).`,
+    ``,
+    `Implementation & Outcome Measures`,
+    `• Use hotspot clusters to target risk-reduction outreach and inspection programs.`,
+    `• Use incident-type and time-window filtering to support evidence-informed resource planning.`,
+    `• Track before/after changes in hotspot density and incident frequency to evaluate impact.`,
+    ``,
+    `Request Summary (fill in)`,
+    `• Equipment/Training/Prevention program requested: [Describe here]`,
+    `• How request addresses the identified risk patterns: [Describe here]`,
+    `• Matching funds/maintenance plan (if applicable): [Describe here]`,
+    ``,
+    `Compliance / Methodology Note`,
+    `This narrative is a planning draft based on incident density patterns and should not be interpreted as a determination of cause, origin, responsibility, or investigative conclusions.`,
+  ].join("\n");
+}
+
+function buildSaferNarrative(i: GrantNarrativeInputs) {
+  const place = [i.city, i.state].filter(Boolean).join(", ");
+  const loc = place ? `${i.departmentName} (${place})` : i.departmentName;
+
+  return [
+    `SAFER Staffing Justification – Draft (Demo “AI Assist”)`,
+    ``,
+    `Department: ${loc}`,
+    `Data window: ${i.timeWindowLabel}`,
+    `Observed activity: ${i.mappedIncidentsCount} mapped incident(s); ${i.hotspotsCount} hotspot cluster(s).`,
+    `Filter: ${i.categoriesLabel}.`,
+    ``,
+    `Operational Need`,
+    `Incident patterns show sustained demand with recurring geographic concentrations that can stress staffing, response times, unit availability, and firefighter safety. Improving staffing levels supports safe and effective operations, especially during peak periods and in recurring hotspot areas.`,
+    ``,
+    `How Hotspot Intelligence Supports SAFER Goals`,
+    `• Identifies recurring areas of high incident density to support deployment and scheduling planning.`,
+    `• Provides defensible, data-backed context for staffing decisions.`,
+    `• Creates a repeatable reporting workflow for annual SAFER progress documentation.`,
+    ``,
+    `Request Summary (fill in)`,
+    `• Staffing request: [# positions / roles / shift model]`,
+    `• Impact on response capability & safety: [Describe here]`,
+    `• Retention/recruitment plan (if applicable): [Describe here]`,
+    ``,
+    `Compliance / Methodology Note`,
+    `This is a planning draft using incident clustering to describe operational demand. It does not assert cause/origin or investigative conclusions (NFPA 921-aligned discipline).`,
+  ].join("\n");
+}
+
+function GrantNarrativePanel(props: GrantNarrativeInputs) {
+  const [mode, setMode] = useState<GrantMode>("AFG");
+  const [draft, setDraft] = useState("");
+
+  useEffect(() => {
+    const generated = mode === "AFG" ? buildAfgNarrative(props) : buildSaferNarrative(props);
+    setDraft(generated);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    mode,
+    props.departmentName,
+    props.city,
+    props.state,
+    props.timeWindowLabel,
+    props.mappedIncidentsCount,
+    props.hotspotsCount,
+    props.categoriesLabel,
+  ]);
+
+  async function copyToClipboard() {
+    try {
+      await navigator.clipboard.writeText(draft);
+    } catch {
+      // ignore (demo-safe)
+    }
+  }
+
+  return (
+    <div className="rounded-lg border border-orange-500/25 bg-orange-950/10 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="flex items-center gap-2">
+            <div className="text-sm font-semibold text-orange-300">AI Assist — Grant Narrative Draft</div>
+            <span className="rounded-full border border-slate-700 bg-slate-950/30 px-2 py-0.5 text-[10px] text-slate-300">
+              Demo mode
+            </span>
+          </div>
+          <div className="mt-1 text-[11px] text-slate-400">
+            Generates editable AFG/SAFER justification language from the current hotspot filters + counts.
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex overflow-hidden rounded-md border border-slate-700">
+            <button
+              type="button"
+              onClick={() => setMode("AFG")}
+              className={cn(
+                "px-3 py-1 text-xs font-semibold",
+                mode === "AFG"
+                  ? "bg-orange-500/20 text-orange-200"
+                  : "bg-slate-950/20 text-slate-200 hover:bg-slate-950/40"
+              )}
+              aria-pressed={mode === "AFG"}
+              title="AFG draft"
+            >
+              AFG
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode("SAFER")}
+              className={cn(
+                "px-3 py-1 text-xs font-semibold",
+                mode === "SAFER"
+                  ? "bg-orange-500/20 text-orange-200"
+                  : "bg-slate-950/20 text-slate-200 hover:bg-slate-950/40"
+              )}
+              aria-pressed={mode === "SAFER"}
+              title="SAFER draft"
+            >
+              SAFER
+            </button>
+          </div>
+
+          <button
+            type="button"
+            onClick={copyToClipboard}
+            className="rounded-md border border-slate-700 bg-slate-950/30 px-3 py-1 text-xs text-slate-200 hover:bg-slate-950/50"
+            title="Copy narrative to clipboard"
+          >
+            Copy
+          </button>
+        </div>
+      </div>
+
+      <div className="mt-3 grid gap-3 md:grid-cols-3">
+        <div className="rounded-md border border-slate-800 bg-slate-950/20 p-3 text-[11px] text-slate-300">
+          <div className="text-[10px] uppercase tracking-wide text-slate-400">Inputs</div>
+          <div className="mt-2 space-y-1">
+            <div>
+              <span className="text-slate-400">Window:</span> {props.timeWindowLabel}
+            </div>
+            <div>
+              <span className="text-slate-400">Category:</span> {props.categoriesLabel}
+            </div>
+            <div>
+              <span className="text-slate-400">Mapped:</span> {props.mappedIncidentsCount} incident(s)
+            </div>
+            <div>
+              <span className="text-slate-400">Hotspots:</span> {props.hotspotsCount} cluster(s)
+            </div>
+          </div>
+          <div className="mt-3 text-[10px] text-slate-500">
+            NFPA note: density patterns ≠ cause/origin conclusions.
+          </div>
+        </div>
+
+        <div className="md:col-span-2">
+          <textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            className="h-56 w-full resize-none rounded-md border border-slate-800 bg-slate-950/30 p-3 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-orange-500/40"
+            aria-label="Grant narrative draft"
+          />
+          <div className="mt-2 text-[11px] text-slate-500">
+            Tip: edit the bracketed lines for your specific request; keep the NFPA note for disciplined claims.
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* =========================
+   Existing page utilities
+   ========================= */
+
 function getApiBase() {
   const fallback = "https://infernointelai-backend.onrender.com";
   return process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") ?? fallback;
@@ -747,7 +954,7 @@ export default function DepartmentDetailPage() {
 
   const [selectedCluster, setSelectedCluster] = useState<HotspotCluster | null>(null);
 
-  // NEW: used by Top Hotspots list to push map focus without refactor
+  // used by Top Hotspots list to push map focus without refactor
   const [focusCenter, setFocusCenter] = useState<GeoPoint | null>(null);
 
   const [generatedAt, setGeneratedAt] = useState<string>(() => new Date().toISOString());
@@ -979,7 +1186,6 @@ export default function DepartmentDetailPage() {
     setMapMode("hotspots");
     setSelectedCluster(c);
     setFocusCenter(c.center);
-    // UX: if you had the page scrolled down, this re-centers your attention on map.
     try {
       document.getElementById("hotspot-map-anchor")?.scrollIntoView({ behavior: "smooth", block: "start" });
     } catch {}
@@ -987,7 +1193,7 @@ export default function DepartmentDetailPage() {
 
   return (
     <section className="space-y-4">
-      {/* Print styles + print-only brief (unchanged from Option 1) */}
+      {/* Print styles + print-only brief */}
       <style>{`
         .print-only { display: none; }
         @media print {
@@ -1224,6 +1430,17 @@ export default function DepartmentDetailPage() {
               </div>
             </div>
 
+            {/* ✅ AI Assist panel (NEW) */}
+            <GrantNarrativePanel
+              departmentName={dept.name}
+              city={dept.city ?? ""}
+              state={dept.state ?? ""}
+              timeWindowLabel={timeRangeLabel(timeRange)}
+              mappedIncidentsCount={pins.length}
+              hotspotsCount={clusters.length}
+              categoriesLabel={typeFilterLabel(typeFilter)}
+            />
+
             <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
               <div className="flex items-start justify-between gap-3">
                 <div>
@@ -1294,7 +1511,7 @@ export default function DepartmentDetailPage() {
                 </div>
               </div>
 
-              {/* ✅ Option 2: Top Hotspots ranked list */}
+              {/* Top Hotspots ranked list */}
               {mapMode === "hotspots" ? (
                 <div className="mt-3 rounded-md border border-slate-800 bg-slate-950/20 p-3">
                   <div className="flex items-start justify-between gap-3">
@@ -1343,9 +1560,7 @@ export default function DepartmentDetailPage() {
                             title="Select hotspot"
                           >
                             <div className="flex items-center justify-between gap-2">
-                              <div className="text-xs font-semibold text-slate-100">
-                                #{idx + 1} Hotspot
-                              </div>
+                              <div className="text-xs font-semibold text-slate-100">#{idx + 1} Hotspot</div>
                               <span
                                 className={cn(
                                   "inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-[11px] font-semibold",
@@ -1362,9 +1577,7 @@ export default function DepartmentDetailPage() {
                               <div className="text-xs text-slate-400">incidents</div>
                             </div>
 
-                            <div className="mt-2 text-[11px] text-slate-500">
-                              Click to open drilldown + zoom
-                            </div>
+                            <div className="mt-2 text-[11px] text-slate-500">Click to open drilldown + zoom</div>
                           </button>
                         );
                       })}
