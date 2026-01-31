@@ -48,7 +48,7 @@ type IncidentPin = {
   occurredAt: string | null;
   lat: number;
   lon: number;
-  categoryKey: TypeFilterKey;
+  dominantCategory: TypeFilterKey;
 };
 
 type HotspotCluster = {
@@ -61,12 +61,10 @@ type HotspotCluster = {
 };
 
 type MapMode = "pins" | "hotspots";
-
 type TimeRangeKey = "30" | "90" | "180" | "365" | "all";
 
 type TypeFilterKey =
   | "all"
-  // Core demo categories (NERIS-ish “type buckets”)
   | "fire"
   | "ems"
   | "hazmat"
@@ -76,8 +74,19 @@ type TypeFilterKey =
 
 type GrantMode = "AFG" | "SAFER" | "CRR";
 
+type GrantNarrativeInputs = {
+  departmentName: string;
+  city: string;
+  state: string;
+  timeWindowLabel: string;
+  mappedIncidentsCount: number;
+  hotspotsCount: number;
+  categoriesLabel: string;
+  topHotspots: Array<{ count: number; dominantLabel: string; radiusMeters: number }>;
+};
+
 // -----------------------------
-// Config / Utilities
+// Utilities
 // -----------------------------
 
 function cn(...classes: Array<string | false | null | undefined>) {
@@ -85,15 +94,15 @@ function cn(...classes: Array<string | false | null | undefined>) {
 }
 
 function getApiBase() {
-  // Prefer the env var you already use elsewhere in the app
+  // Prefer the env var you already use in Vercel
   const fromUrl = process.env.NEXT_PUBLIC_API_BASE_URL?.trim();
   if (fromUrl) return fromUrl.replace(/\/+$/, "");
 
-  // Back-compat: if you ever used a shorter name
+  // Back-compat
   const fromBase = process.env.NEXT_PUBLIC_API_BASE?.trim();
   if (fromBase) return fromBase.replace(/\/+$/, "");
 
-  // Known-good fallback (matches your prior working baseline)
+  // Demo-safe fallback
   return "https://infernointelai-backend.onrender.com";
 }
 
@@ -103,6 +112,13 @@ async function safeJson(res: Response) {
   } catch {
     return null;
   }
+}
+
+function normalizeAddressParts(parts: Array<string | null | undefined>) {
+  return parts
+    .map((p) => (p ?? "").trim())
+    .filter(Boolean)
+    .join(", ");
 }
 
 function fmtLocalUtc(iso: string) {
@@ -118,27 +134,6 @@ function fmtLocalUtc(iso: string) {
     }),
     utc: d.toUTCString(),
   };
-}
-
-function normalizeAddressParts(parts: Array<string | null | undefined>) {
-  return parts
-    .map((p) => (p ?? "").trim())
-    .filter(Boolean)
-    .join(", ");
-}
-
-function buildDeptQuery(dept: Department) {
-  return normalizeAddressParts([dept.name, dept.city ?? null, dept.state ?? null]);
-}
-
-function osmSearchUrl(q: string) {
-  const u = new URL("https://www.openstreetmap.org/search");
-  u.searchParams.set("query", q);
-  return u.toString();
-}
-
-function incidentAddressLine(i: ApiIncident) {
-  return normalizeAddressParts([i.address, i.city, i.state]);
 }
 
 function timeRangeLabel(k: TimeRangeKey) {
@@ -160,57 +155,79 @@ function rangeStartDate(timeRange: TimeRangeKey) {
   if (timeRange === "all") return null;
   const now = new Date();
   const days = Number(timeRange);
-  const start = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
-  return start;
+  return new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
+}
+
+function incidentAddressLine(i: ApiIncident) {
+  return normalizeAddressParts([i.address, i.city, i.state]);
+}
+
+function deptQuery(d: Department) {
+  return normalizeAddressParts([d.name, d.city ?? null, d.state ?? null]);
+}
+
+function osmSearchUrl(q: string) {
+  const u = new URL("https://www.openstreetmap.org/search");
+  u.searchParams.set("query", q);
+  return u.toString();
 }
 
 /**
  * Demo category mapping.
- * In a real build we’ll map exact NERIS incident codes → a controlled taxonomy.
+ * In a real build we’ll map exact NERIS incident codes → controlled taxonomy.
  */
 function classifyIncident(i: ApiIncident): TypeFilterKey {
-  // If you have a real NERIS incident_type_code, map it here.
   const t = (i.incident_type_code ?? "").toLowerCase();
-
   if (t.includes("fire")) return "fire";
   if (t.includes("ems") || t.includes("medical")) return "ems";
   if (t.includes("haz")) return "hazmat";
   if (t.includes("service") || t.includes("assist")) return "service";
   if (t.includes("false") || t.includes("alarm")) return "false_alarm";
-
-  // Soft fallback based on presence of neris id (demo only)
   return "other";
 }
 
-function categoryMeta(k: TypeFilterKey) {
+function typeFilterLabel(k: TypeFilterKey) {
+  switch (k) {
+    case "all":
+      return "All categories";
+    case "fire":
+      return "Fire";
+    case "ems":
+      return "EMS";
+    case "hazmat":
+      return "HazMat";
+    case "service":
+      return "Service";
+    case "false_alarm":
+      return "False Alarm";
+    case "other":
+      return "Other";
+  }
+}
+
+function typeFilterColor(k: TypeFilterKey) {
   switch (k) {
     case "fire":
-      return { label: "Fire", pinColor: "#ef4444" };
+      return "#ef4444";
     case "ems":
-      return { label: "EMS", pinColor: "#22c55e" };
+      return "#22c55e";
     case "hazmat":
-      return { label: "HazMat", pinColor: "#a855f7" };
+      return "#a855f7";
     case "service":
-      return { label: "Service", pinColor: "#38bdf8" };
+      return "#38bdf8";
     case "false_alarm":
-      return { label: "False Alarm", pinColor: "#f59e0b" };
+      return "#f59e0b";
     case "other":
-      return { label: "Other", pinColor: "#94a3b8" };
     case "all":
     default:
-      return { label: "All categories", pinColor: "#e2e8f0" };
+      return "#94a3b8";
   }
 }
 
 // -----------------------------
-// Geocoding (Nominatim / OSM)
+// Geocoding (Nominatim / OSM) with localStorage cache
 // -----------------------------
 
-/**
- * Nominatim is rate limited. Demo-safe approach:
- * - Small batches
- * - Cache in localStorage
- */
 function geocodeCacheKey(q: string) {
   return `geocode:v1:${q.toLowerCase()}`;
 }
@@ -239,7 +256,6 @@ async function geocodeAddress(q: string, signal?: AbortSignal): Promise<GeoPoint
   const cached = typeof window !== "undefined" ? readGeocodeCache(q) : null;
   if (cached) return cached;
 
-  // Nominatim usage policy: provide a valid UA and keep volume low.
   const url = new URL("https://nominatim.openstreetmap.org/search");
   url.searchParams.set("q", q);
   url.searchParams.set("format", "json");
@@ -247,10 +263,7 @@ async function geocodeAddress(q: string, signal?: AbortSignal): Promise<GeoPoint
 
   const res = await fetch(url.toString(), {
     method: "GET",
-    headers: {
-      // This is a demo app; still be polite.
-      "Accept-Language": "en",
-    },
+    headers: { "Accept-Language": "en" },
     signal,
   });
 
@@ -258,19 +271,19 @@ async function geocodeAddress(q: string, signal?: AbortSignal): Promise<GeoPoint
 
   const data = (await res.json().catch(() => null)) as any;
   const first = Array.isArray(data) ? data[0] : null;
+
   const lat = first?.lat ? Number(first.lat) : NaN;
   const lon = first?.lon ? Number(first.lon) : NaN;
+
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
 
   const p = { lat, lon };
-  try {
-    writeGeocodeCache(q, p);
-  } catch {}
+  writeGeocodeCache(q, p);
   return p;
 }
 
 // -----------------------------
-// Hotspot clustering (simple, stable demo approach)
+// Hotspot clustering
 // -----------------------------
 
 function haversineMeters(a: GeoPoint, b: GeoPoint) {
@@ -283,13 +296,12 @@ function haversineMeters(a: GeoPoint, b: GeoPoint) {
 
   const sin1 = Math.sin(dLat / 2);
   const sin2 = Math.sin(dLon / 2);
-
   const h = sin1 * sin1 + Math.cos(lat1) * Math.cos(lat2) * sin2 * sin2;
+
   return 2 * R * Math.asin(Math.sqrt(h));
 }
 
 function computeClusters(pins: IncidentPin[], thresholdMeters: number): HotspotCluster[] {
-  // Greedy clustering (demo-safe, predictable).
   const unused = pins.slice();
   const clusters: HotspotCluster[] = [];
 
@@ -297,13 +309,14 @@ function computeClusters(pins: IncidentPin[], thresholdMeters: number): HotspotC
     const seed = unused.shift()!;
     const group = [seed];
 
-    // Pull in pins close to seed; also allow chaining (simple approach).
     let changed = true;
     while (changed) {
       changed = false;
       for (let i = unused.length - 1; i >= 0; i--) {
         const p = unused[i];
-        const closeToAny = group.some((g) => haversineMeters({ lat: g.lat, lon: g.lon }, { lat: p.lat, lon: p.lon }) <= thresholdMeters);
+        const closeToAny = group.some(
+          (g) => haversineMeters({ lat: g.lat, lon: g.lon }, { lat: p.lat, lon: p.lon }) <= thresholdMeters
+        );
         if (closeToAny) {
           group.push(p);
           unused.splice(i, 1);
@@ -312,20 +325,18 @@ function computeClusters(pins: IncidentPin[], thresholdMeters: number): HotspotC
       }
     }
 
-    // Compute center
     const avgLat = group.reduce((s, p) => s + p.lat, 0) / group.length;
     const avgLon = group.reduce((s, p) => s + p.lon, 0) / group.length;
-
-    // Compute max radius
     const center: GeoPoint = { lat: avgLat, lon: avgLon };
+
     const radius = Math.max(
       120,
       group.reduce((mx, p) => Math.max(mx, haversineMeters(center, { lat: p.lat, lon: p.lon })), 0) + 80
     );
 
-    // Dominant category
     const counts = new Map<TypeFilterKey, number>();
-    for (const p of group) counts.set(p.categoryKey, (counts.get(p.categoryKey) ?? 0) + 1);
+    for (const p of group) counts.set(p.dominantCategory, (counts.get(p.dominantCategory) ?? 0) + 1);
+
     let dominant: TypeFilterKey = "other";
     let best = -1;
     for (const [k, v] of counts.entries()) {
@@ -345,326 +356,184 @@ function computeClusters(pins: IncidentPin[], thresholdMeters: number): HotspotC
     });
   }
 
-  // Sort: biggest first
   clusters.sort((a, b) => b.count - a.count);
   return clusters;
 }
 
 // -----------------------------
-// UI Components (small, local)
+// AI Draft builders
 // -----------------------------
-
-function TimeFilterChips({
-  value,
-  onChange,
-}: {
-  value: TimeRangeKey;
-  onChange: (v: TimeRangeKey) => void;
-}) {
-  const opts: Array<{ key: TimeRangeKey; label: string }> = [
-    { key: "30", label: "30d" },
-    { key: "90", label: "90d" },
-    { key: "180", label: "180d" },
-    { key: "365", label: "365d" },
-    { key: "all", label: "All" },
-  ];
-
-  return (
-    <div className="flex flex-wrap items-center gap-2">
-      {opts.map((o) => (
-        <button
-          key={o.key}
-          type="button"
-          onClick={() => onChange(o.key)}
-          className={cn(
-            "rounded-full border px-3 py-1 text-xs font-semibold",
-            value === o.key
-              ? "border-orange-400/60 bg-orange-500/10 text-orange-200"
-              : "border-slate-800 bg-slate-950/20 text-slate-200 hover:border-slate-700"
-          )}
-          aria-pressed={value === o.key}
-        >
-          {o.label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function TypeFilterChips({
-  value,
-  onChange,
-}: {
-  value: TypeFilterKey;
-  onChange: (v: TypeFilterKey) => void;
-}) {
-  const opts: Array<{ key: TypeFilterKey; label: string }> = [
-    { key: "all", label: "All" },
-    { key: "fire", label: "Fire" },
-    { key: "ems", label: "EMS" },
-    { key: "hazmat", label: "HazMat" },
-    { key: "service", label: "Service" },
-    { key: "false_alarm", label: "False Alarm" },
-    { key: "other", label: "Other" },
-  ];
-
-  return (
-    <div className="flex flex-wrap items-center gap-2">
-      {opts.map((o) => (
-        <button
-          key={o.key}
-          type="button"
-          onClick={() => onChange(o.key)}
-          className={cn(
-            "rounded-full border px-3 py-1 text-xs font-semibold",
-            value === o.key
-              ? "border-orange-400/60 bg-orange-500/10 text-orange-200"
-              : "border-slate-800 bg-slate-950/20 text-slate-200 hover:border-slate-700"
-          )}
-          aria-pressed={value === o.key}
-        >
-          {o.label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function MapModeToggle({
-  value,
-  onChange,
-}: {
-  value: MapMode;
-  onChange: (v: MapMode) => void;
-}) {
-  return (
-    <div className="inline-flex overflow-hidden rounded-md border border-slate-800 bg-slate-950/20">
-      <button
-        type="button"
-        onClick={() => onChange("hotspots")}
-        className={cn(
-          "px-3 py-2 text-xs font-semibold",
-          value === "hotspots" ? "bg-orange-500/20 text-orange-200" : "text-slate-200 hover:bg-slate-950/40"
-        )}
-        aria-pressed={value === "hotspots"}
-        title="Hotspot circles"
-      >
-        Hotspots
-      </button>
-      <button
-        type="button"
-        onClick={() => onChange("pins")}
-        className={cn(
-          "px-3 py-2 text-xs font-semibold",
-          value === "pins" ? "bg-orange-500/20 text-orange-200" : "text-slate-200 hover:bg-slate-950/40"
-        )}
-        aria-pressed={value === "pins"}
-        title="Individual pins"
-      >
-        Pins
-      </button>
-    </div>
-  );
-}
-
-// -----------------------------
-// AI Assist: Grant / CRR drafts
-// -----------------------------
-
-type GrantNarrativeInputs = {
-  departmentName: string;
-  cityState: string;
-  timeWindowLabel: string;
-  categoriesLabel: string;
-  mappedIncidentsCount: number;
-  hotspotsCount: number;
-  topHotspotCount: number;
-  trend30: number;
-  trend90: number;
-  nfpaNote: string;
-};
 
 function buildAfgNarrative(i: GrantNarrativeInputs) {
+  const place = [i.city, i.state].filter(Boolean).join(", ");
+  const loc = place ? `${i.departmentName} (${place})` : i.departmentName;
+
   return [
-    `AFG Narrative Draft (Demo “AI Assist”)`,
+    `AFG Justification – Draft (Demo “AI Assist”)`,
     ``,
-    `Department: ${i.departmentName}${i.cityState ? ` (${i.cityState})` : ""}`,
-    `Window: ${i.timeWindowLabel} • Filter: ${i.categoriesLabel}`,
+    `Department: ${loc}`,
+    `Data window: ${i.timeWindowLabel}`,
+    `Observed activity: ${i.mappedIncidentsCount} mapped incident(s); ${i.hotspotsCount} hotspot cluster(s).`,
+    `Filter: ${i.categoriesLabel}.`,
     ``,
     `Problem Statement`,
-    `${i.departmentName} has identified repeat incident density patterns within our response area using NERIS Hotspot Intelligence. During the ${i.timeWindowLabel} window, the system mapped ${i.mappedIncidentsCount} incident address(es) for analysis and identified ${i.hotspotsCount} hotspot area(s). The leading hotspot contains approximately ${i.topHotspotCount} incident(s) in close proximity, indicating concentrated demand that strains resources and increases operational risk.`,
+    `Recent incident data shows recurring, geographically concentrated call density (“hotspots”) within the ${i.timeWindowLabel} window. This pattern indicates sustained operational demand and elevated risk exposure for responders and the community.`,
     ``,
-    `Project Impact`,
-    `AFG investment will strengthen operational readiness and reduce risk in these demand zones by improving response capability, supporting firefighter safety, and enabling more effective deployment planning. Hotspot intelligence will also help leadership target training and prevention efforts where repeat activity is observed.`,
+    `Project Purpose`,
+    `InfernoIntelAI NERIS Hotspot Intelligence converts incident records into operationally useful location intelligence—helping leadership prioritize prevention, readiness, and resource planning. This workflow supports disciplined documentation by separating pattern detection from cause/origin conclusions (NFPA 921-aligned).`,
     ``,
-    `Data & Evaluation`,
-    `We will track performance using incident volume trends and hotspot metrics. Current reference: ${i.trend30} incidents in the last 30 days vs ${i.trend90} in the last 90 days (category-aware). We will monitor repeat-location density, response outcomes, and readiness indicators over time.`,
+    `Implementation & Outcome Measures`,
+    `• Use hotspot clusters to target risk-reduction outreach and inspection programs.`,
+    `• Use incident-type and time-window filtering to support evidence-informed resource planning.`,
+    `• Track before/after changes in hotspot density and incident frequency to evaluate impact.`,
     ``,
-    `NFPA-aligned note`,
-    i.nfpaNote,
+    `Request Summary (fill in)`,
+    `• Equipment/Training/Prevention program requested: [Describe here]`,
+    `• How request addresses the identified risk patterns: [Describe here]`,
+    `• Matching funds/maintenance plan (if applicable): [Describe here]`,
+    ``,
+    `Compliance / Methodology Note`,
+    `This narrative is a planning draft based on incident density patterns and should not be interpreted as a determination of cause, origin, responsibility, or investigative conclusions.`,
   ].join("\n");
 }
 
 function buildSaferNarrative(i: GrantNarrativeInputs) {
+  const place = [i.city, i.state].filter(Boolean).join(", ");
+  const loc = place ? `${i.departmentName} (${place})` : i.departmentName;
+
   return [
-    `SAFER Narrative Draft (Demo “AI Assist”)`,
+    `SAFER Staffing Justification – Draft (Demo “AI Assist”)`,
     ``,
-    `Department: ${i.departmentName}${i.cityState ? ` (${i.cityState})` : ""}`,
-    `Window: ${i.timeWindowLabel} • Filter: ${i.categoriesLabel}`,
+    `Department: ${loc}`,
+    `Data window: ${i.timeWindowLabel}`,
+    `Observed activity: ${i.mappedIncidentsCount} mapped incident(s); ${i.hotspotsCount} hotspot cluster(s).`,
+    `Filter: ${i.categoriesLabel}.`,
     ``,
-    `Staffing Need Justification`,
-    `${i.departmentName} experiences concentrated incident activity in specific zones as shown by NERIS Hotspot Intelligence. During the ${i.timeWindowLabel} window, ${i.hotspotsCount} hotspot area(s) were identified from ${i.mappedIncidentsCount} mapped incident address(es). The leading hotspot contains approximately ${i.topHotspotCount} incident(s), indicating repeat demand that can increase fatigue, extend response times, and elevate risk when staffing is constrained.`,
+    `Operational Need`,
+    `Incident patterns show sustained demand with recurring geographic concentrations that can stress staffing, response times, unit availability, and firefighter safety. Improving staffing levels supports safe and effective operations, especially during peak periods and in recurring hotspot areas.`,
     ``,
-    `Operational Impact`,
-    `Additional staffing supports safe, effective operations and helps ensure reliable coverage during repeat-demand periods. Improved staffing strengthens the department’s ability to meet workload surges, manage simultaneous incidents, and sustain training and prevention activities tied to these hotspot zones.`,
+    `How Hotspot Intelligence Supports SAFER Goals`,
+    `• Identifies recurring areas of high incident density to support deployment and scheduling planning.`,
+    `• Provides defensible, data-backed context for staffing decisions.`,
+    `• Creates a repeatable reporting workflow for annual SAFER progress documentation.`,
     ``,
-    `Measurement`,
-    `We will track incident workload trends and hotspot counts as a repeat-demand proxy. Current reference: ${i.trend30} incidents in the last 30 days vs ${i.trend90} in the last 90 days. We will also monitor response time stability and repeat-location reduction over time.`,
+    `Request Summary (fill in)`,
+    `• Staffing request: [# positions / roles / shift model]`,
+    `• Impact on response capability & safety: [Describe here]`,
+    `• Retention/recruitment plan (if applicable): [Describe here]`,
     ``,
-    `NFPA-aligned note`,
-    i.nfpaNote,
+    `Compliance / Methodology Note`,
+    `This is a planning draft using incident clustering to describe operational demand. It does not assert cause/origin or investigative conclusions (NFPA 921-aligned discipline).`,
   ].join("\n");
 }
 
 function buildCrrBrief(i: GrantNarrativeInputs) {
+  const place = [i.city, i.state].filter(Boolean).join(", ");
+  const loc = place ? `${i.departmentName} (${place})` : i.departmentName;
+
+  const top = (i.topHotspots ?? []).slice(0, 3);
+  const topLines =
+    top.length === 0
+      ? ["• No hotspot clusters available in the current mapped preview."]
+      : top.map(
+          (h, idx) =>
+            `• Hotspot ${idx + 1}: ${h.count} incident(s) (dominant: ${h.dominantLabel}) • radius ~${Math.round(
+              h.radiusMeters
+            )}m`
+        );
+
   return [
     `CRR Executive Brief – Draft (Demo “AI Assist”)`,
     ``,
-    `Department: ${i.departmentName}${i.cityState ? ` (${i.cityState})` : ""}`,
-    `Window: ${i.timeWindowLabel} • Filter: ${i.categoriesLabel}`,
+    `Department: ${loc}`,
+    `Data window: ${i.timeWindowLabel}`,
+    `Filter: ${i.categoriesLabel}`,
     ``,
-    `Community Risk Reduction (CRR) Summary`,
-    `${i.departmentName} is observing geographically concentrated incident activity during the ${i.timeWindowLabel} window, with ${i.hotspotsCount} hotspot area(s) identified from ${i.mappedIncidentsCount} mapped incident address(es) in the current view. The leading hotspot contains approximately ${i.topHotspotCount} incident(s), suggesting repeat-demand zones where focused prevention, inspection support, and public education can deliver outsized impact.`,
+    `Community Risk Summary`,
+    `Current incident mapping shows ${i.mappedIncidentsCount} mappable incident address(es) and ${i.hotspotsCount} hotspot cluster(s) in the selected window. These clusters highlight repeat-demand zones where targeted prevention, inspections coordination, and public education can reduce risk and stabilize workload.`,
+    ``,
+    `Top Hotspots (Mapped Preview)`,
+    ...topLines,
     ``,
     `Recommended CRR Actions (select & tailor)`,
     `• Targeted smoke/CO alarm outreach in hotspot zones`,
     `• Focused inspections / code enforcement coordination for repeat locations`,
     `• Public education aligned to incident mix (cooking, electrical, heating, outdoor burning)`,
     `• Pre-plan updates for high-frequency addresses and critical infrastructure`,
-    `• Partner outreach (schools, senior housing, multifamily property managers)`,
-    ``,
-    `Outcome Metrics (simple + investor-friendly)`,
-    `• Repeat-location incident reduction`,
-    `• Hotspot count and intensity trending over time`,
-    `• Response time stability in peak periods`,
-    `• Severity indicators (e.g., working fire rate / transport rate) where available`,
+    `• Outcome measures: repeat-location reduction, hotspot intensity trend, response time stability`,
     ``,
     `NFPA-aligned note`,
-    i.nfpaNote,
+    `This brief describes density patterns only and does not represent cause/origin conclusions.`,
   ].join("\n");
 }
 
-function GrantNarrativePanel({
-  departmentName,
-  cityState,
-  timeWindowLabel,
-  categoriesLabel,
-  mappedIncidentsCount,
-  hotspotsCount,
-  topHotspotCount,
-  trend30,
-  trend90,
-}: {
-  departmentName: string;
-  cityState: string;
-  timeWindowLabel: string;
-  categoriesLabel: string;
-  mappedIncidentsCount: number;
-  hotspotsCount: number;
-  topHotspotCount: number;
-  trend30: number;
-  trend90: number;
-}) {
-  const storageKey = useMemo(() => `inferno:grantDraft:${departmentName}`, [departmentName]);
-
+function GrantNarrativePanel(props: GrantNarrativeInputs) {
   const [mode, setMode] = useState<GrantMode>("AFG");
-  const [draft, setDraft] = useState<string>("");
-
-  const nfpaNote =
-    "Hotspot intelligence describes density patterns for triage and planning; it does not indicate cause/origin or investigative conclusions (NFPA-aligned discipline).";
-
-  const inputs: GrantNarrativeInputs = useMemo(
-    () => ({
-      departmentName,
-      cityState,
-      timeWindowLabel,
-      categoriesLabel,
-      mappedIncidentsCount,
-      hotspotsCount,
-      topHotspotCount,
-      trend30,
-      trend90,
-      nfpaNote,
-    }),
-    [
-      departmentName,
-      cityState,
-      timeWindowLabel,
-      categoriesLabel,
-      mappedIncidentsCount,
-      hotspotsCount,
-      topHotspotCount,
-      trend30,
-      trend90,
-    ]
-  );
+  const [draft, setDraft] = useState("");
 
   useEffect(() => {
-    // Load saved draft
-    try {
-      const saved = localStorage.getItem(storageKey);
-      if (saved) setDraft(saved);
-    } catch {
-      // ignore
-    }
-  }, [storageKey]);
-
-  useEffect(() => {
-    // Auto-generate if empty
-    if (draft.trim().length > 0) return;
-
     const generated =
-      mode === "AFG" ? buildAfgNarrative(inputs) : mode === "SAFER" ? buildSaferNarrative(inputs) : buildCrrBrief(inputs);
-
+      mode === "AFG" ? buildAfgNarrative(props) : mode === "SAFER" ? buildSaferNarrative(props) : buildCrrBrief(props);
     setDraft(generated);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, inputs]);
+  }, [
+    mode,
+    props.departmentName,
+    props.city,
+    props.state,
+    props.timeWindowLabel,
+    props.mappedIncidentsCount,
+    props.hotspotsCount,
+    props.categoriesLabel,
+    props.topHotspots,
+  ]);
 
-  useEffect(() => {
-    // Persist
-    try {
-      localStorage.setItem(storageKey, draft);
-    } catch {
-      // ignore
-    }
-  }, [storageKey, draft]);
+  function insertTopHotspots() {
+    if (mode !== "CRR") return;
 
-  function regen() {
-    const generated =
-      mode === "AFG" ? buildAfgNarrative(inputs) : mode === "SAFER" ? buildSaferNarrative(inputs) : buildCrrBrief(inputs);
-    setDraft(generated);
+    const top = (props.topHotspots ?? []).slice(0, 3);
+    const lines =
+      top.length === 0
+        ? ["• No hotspot clusters available in the current mapped preview."]
+        : top.map(
+            (h, idx) =>
+              `• Hotspot ${idx + 1}: ${h.count} incident(s) (dominant: ${h.dominantLabel}) • radius ~${Math.round(
+                h.radiusMeters
+              )}m`
+          );
+
+    setDraft((prev) => {
+      const marker = "Top Hotspots (Mapped Preview)";
+      if (prev.includes(marker)) return prev; // avoid duplicates in demo
+      return `${prev}\n\n${marker}\n${lines.join("\n")}`;
+    });
   }
 
-  async function copy() {
+  async function copyToClipboard() {
     try {
       await navigator.clipboard.writeText(draft);
     } catch {
-      // ignore
+      // ignore (demo-safe)
     }
   }
 
   return (
-    <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
+    <div className="rounded-lg border border-orange-500/25 bg-orange-950/10 p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <div className="text-sm font-semibold text-slate-100">AI Assist — Grant / CRR Draft</div>
+          <div className="flex items-center gap-2">
+            <div className="text-sm font-semibold text-orange-300">AI Assist — Grant Narrative Draft</div>
+            <span className="rounded-full border border-slate-700 bg-slate-950/30 px-2 py-0.5 text-[10px] text-slate-300">
+              Demo mode
+            </span>
+          </div>
           <div className="mt-1 text-[11px] text-slate-400">
-            Generates editable AFG/SAFER justification language and a CRR executive brief from the current hotspot filters + counts.
+            Generates editable AFG/SAFER justification language and a CRR executive brief from live hotspot filters + counts.
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
-          <div className="inline-flex overflow-hidden rounded-md border border-slate-800 bg-slate-950/20">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex overflow-hidden rounded-md border border-slate-700">
             <button
               type="button"
               onClick={() => setMode("AFG")}
@@ -703,56 +572,81 @@ function GrantNarrativePanel({
                   : "bg-slate-950/20 text-slate-200 hover:bg-slate-950/40"
               )}
               aria-pressed={mode === "CRR"}
-              title="CRR brief"
+              title="CRR executive brief"
             >
               CRR
             </button>
           </div>
 
+          {mode === "CRR" ? (
+            <button
+              type="button"
+              onClick={insertTopHotspots}
+              className="rounded-md border border-slate-700 bg-slate-950/30 px-3 py-1 text-xs text-slate-200 hover:bg-slate-950/50"
+              title="Insert the Top Hotspots list into the CRR draft"
+            >
+              Insert Top Hotspots
+            </button>
+          ) : null}
+
           <button
             type="button"
-            className="rounded-md border border-slate-800 bg-slate-950/30 px-3 py-2 text-xs font-semibold text-slate-100 hover:border-orange-400"
-            onClick={regen}
-            title="Regenerate draft"
-          >
-            Regenerate
-          </button>
-          <button
-            type="button"
-            className="rounded-md border border-slate-800 bg-slate-950/30 px-3 py-2 text-xs font-semibold text-slate-100 hover:border-orange-400"
-            onClick={copy}
-            title="Copy draft to clipboard"
+            onClick={copyToClipboard}
+            className="rounded-md border border-slate-700 bg-slate-950/30 px-3 py-1 text-xs text-slate-200 hover:bg-slate-950/50"
+            title="Copy narrative to clipboard"
           >
             Copy
           </button>
         </div>
       </div>
 
-      <textarea
-        className="mt-3 h-60 w-full resize-none rounded-md border border-slate-800 bg-slate-950/40 p-3 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-orange-500/40"
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        placeholder="Your generated draft will appear here…"
-      />
-      <div className="mt-2 text-[11px] text-slate-500">Saved locally to this browser for demo reliability.</div>
+      <div className="mt-3 grid gap-3 md:grid-cols-3">
+        <div className="rounded-md border border-slate-800 bg-slate-950/20 p-3 text-[11px] text-slate-300">
+          <div className="text-[10px] uppercase tracking-wide text-slate-400">Inputs</div>
+          <div className="mt-2 space-y-1">
+            <div>
+              <span className="text-slate-400">Window:</span> {props.timeWindowLabel}
+            </div>
+            <div>
+              <span className="text-slate-400">Category:</span> {props.categoriesLabel}
+            </div>
+            <div>
+              <span className="text-slate-400">Mapped:</span> {props.mappedIncidentsCount} incident(s)
+            </div>
+            <div>
+              <span className="text-slate-400">Hotspots:</span> {props.hotspotsCount} cluster(s)
+            </div>
+          </div>
+          <div className="mt-3 text-[10px] text-slate-500">
+            NFPA note: density patterns ≠ cause/origin conclusions.
+          </div>
+        </div>
+
+        <div className="md:col-span-2">
+          <textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            className="h-56 w-full resize-none rounded-md border border-slate-800 bg-slate-950/30 p-3 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-orange-500/40"
+            aria-label="Narrative draft"
+          />
+          <div className="mt-2 text-[11px] text-slate-500">
+            Tip: AFG/SAFER—edit the bracketed lines. CRR—trim to a 1-paragraph executive brief for chiefs/council.
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
 
 // -----------------------------
-// Leaflet map (loaded via CDN for demo simplicity)
+// Leaflet map (loaded via CDN)
 // -----------------------------
 
-/**
- * Map with optional external "focus center" (for Top Hotspots Select).
- * Avoids refactors: accept a point and setView when it changes.
- */
 function HotspotLeafletMap({
   center,
   focusCenter,
   pins,
   clusters,
-  departmentId,
   mode,
   onHotspotClick,
 }: {
@@ -760,9 +654,8 @@ function HotspotLeafletMap({
   focusCenter: GeoPoint | null;
   pins: IncidentPin[];
   clusters: HotspotCluster[];
-  departmentId: number;
   mode: MapMode;
-  onHotspotClick: (cluster: HotspotCluster) => void;
+  onHotspotClick: (c: HotspotCluster) => void;
 }) {
   const mapDivRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<any>(null);
@@ -824,7 +717,6 @@ function HotspotLeafletMap({
     };
   }, []);
 
-  // Init map
   useEffect(() => {
     if (!leafletReady) return;
     if (!mapDivRef.current) return;
@@ -845,7 +737,6 @@ function HotspotLeafletMap({
     }).setView(initialCenter, initialZoom);
 
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      // OSM tiles
       maxZoom: 19,
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
     }).addTo(map);
@@ -855,7 +746,6 @@ function HotspotLeafletMap({
     layerRef.current = layer;
   }, [leafletReady, center]);
 
-  // Focus center (Top Hotspots select)
   useEffect(() => {
     if (!leafletReady) return;
     const map = mapRef.current;
@@ -869,9 +759,9 @@ function HotspotLeafletMap({
     }
   }, [leafletReady, focusCenter]);
 
-  // Render markers/circles
   useEffect(() => {
     if (!leafletReady) return;
+
     const map = mapRef.current;
     const layer = layerRef.current;
     const L = (window as any).L;
@@ -883,16 +773,18 @@ function HotspotLeafletMap({
 
     if (mode === "pins") {
       for (const p of pins) {
-        const meta = categoryMeta(p.categoryKey);
+        const color = typeFilterColor(p.dominantCategory);
+
         const marker = L.circleMarker([p.lat, p.lon], {
           radius: 7,
-          color: meta.pinColor,
+          color,
           weight: 2,
-          fillColor: meta.pinColor,
+          fillColor: color,
           fillOpacity: 0.9,
         });
 
         const when = p.occurredAt ? fmtLocalUtc(p.occurredAt).local : "—";
+
         marker.bindPopup(`
           <div style="font-size:12px; line-height: 1.25;">
             <div style="font-weight:700; margin-bottom:4px;">${p.label}</div>
@@ -901,25 +793,21 @@ function HotspotLeafletMap({
           </div>
         `);
 
-        marker.on("click", () => {
-          // Let Next handle routing; we just open popup.
-        });
-
         marker.addTo(layer);
         bounds.push([p.lat, p.lon]);
       }
     } else {
       for (const c of clusters) {
-        const meta = categoryMeta(c.dominantCategory);
+        const color = typeFilterColor(c.dominantCategory);
+
         const circle = L.circle([c.center.lat, c.center.lon], {
           radius: c.radiusMeters,
-          color: meta.pinColor,
+          color,
           weight: 2,
-          fillColor: meta.pinColor,
+          fillColor: color,
           fillOpacity: 0.16,
         });
 
-        // Label badge (count)
         const label = L.marker([c.center.lat, c.center.lon], {
           interactive: true,
           icon: L.divIcon({
@@ -927,7 +815,7 @@ function HotspotLeafletMap({
             html: `<div style="
               width:28px; height:28px; border-radius:999px;
               display:flex; align-items:center; justify-content:center;
-              border:2px solid ${meta.pinColor};
+              border:2px solid ${color};
               background: rgba(2,6,23,0.80);
               color: #e2e8f0;
               font-weight: 800;
@@ -939,25 +827,23 @@ function HotspotLeafletMap({
           }),
         });
 
-        const safeCat = categoryMeta(c.dominantCategory).label;
-
         circle.bindPopup(`
           <div style="font-size:12px; line-height: 1.25;">
             <div style="font-weight:800; margin-bottom:4px;">Hotspot: ${c.count} incidents</div>
-            <div style="opacity:0.85; margin-bottom:4px;">Dominant category: ${safeCat}</div>
+            <div style="opacity:0.85; margin-bottom:4px;">Dominant category: ${typeFilterLabel(c.dominantCategory)}</div>
             <div style="opacity:0.85;">Click to drill down.</div>
           </div>
         `);
 
-        const handleClusterClick = () => {
+        const handle = () => {
           onHotspotClick(c);
           try {
             map.setView([c.center.lat, c.center.lon], Math.max(map.getZoom(), 14), { animate: true });
           } catch {}
         };
 
-        circle.on("click", handleClusterClick);
-        label.on("click", handleClusterClick);
+        circle.on("click", handle);
+        label.on("click", handle);
 
         circle.addTo(layer);
         label.addTo(layer);
@@ -966,7 +852,6 @@ function HotspotLeafletMap({
       }
     }
 
-    // Fit to data if no focusCenter
     if (!focusCenter) {
       if (bounds.length >= 2) {
         try {
@@ -978,7 +863,7 @@ function HotspotLeafletMap({
         } catch {}
       }
     }
-  }, [leafletReady, pins, clusters, departmentId, mode, onHotspotClick, focusCenter]);
+  }, [leafletReady, pins, clusters, mode, onHotspotClick, focusCenter]);
 
   if (leafletError) {
     return <div className="p-4 text-xs text-red-200">Map failed to load: {leafletError}</div>;
@@ -992,13 +877,111 @@ function HotspotLeafletMap({
 }
 
 // -----------------------------
+// UI helpers
+// -----------------------------
+
+function TimeFilterChips({ value, onChange }: { value: TimeRangeKey; onChange: (v: TimeRangeKey) => void }) {
+  const opts: Array<{ key: TimeRangeKey; label: string }> = [
+    { key: "30", label: "30d" },
+    { key: "90", label: "90d" },
+    { key: "180", label: "180d" },
+    { key: "365", label: "365d" },
+    { key: "all", label: "All" },
+  ];
+
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      {opts.map((o) => (
+        <button
+          key={o.key}
+          type="button"
+          onClick={() => onChange(o.key)}
+          className={cn(
+            "rounded-full border px-3 py-1 text-xs font-semibold",
+            value === o.key
+              ? "border-orange-400/60 bg-orange-500/10 text-orange-200"
+              : "border-slate-800 bg-slate-950/20 text-slate-200 hover:border-slate-700"
+          )}
+          aria-pressed={value === o.key}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function TypeFilterChips({ value, onChange }: { value: TypeFilterKey; onChange: (v: TypeFilterKey) => void }) {
+  const opts: Array<{ key: TypeFilterKey; label: string }> = [
+    { key: "all", label: "All" },
+    { key: "fire", label: "Fire" },
+    { key: "ems", label: "EMS" },
+    { key: "hazmat", label: "HazMat" },
+    { key: "service", label: "Service" },
+    { key: "false_alarm", label: "False Alarm" },
+    { key: "other", label: "Other" },
+  ];
+
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      {opts.map((o) => (
+        <button
+          key={o.key}
+          type="button"
+          onClick={() => onChange(o.key)}
+          className={cn(
+            "rounded-full border px-3 py-1 text-xs font-semibold",
+            value === o.key
+              ? "border-orange-400/60 bg-orange-500/10 text-orange-200"
+              : "border-slate-800 bg-slate-950/20 text-slate-200 hover:border-slate-700"
+          )}
+          aria-pressed={value === o.key}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function MapModeToggle({ value, onChange }: { value: MapMode; onChange: (v: MapMode) => void }) {
+  return (
+    <div className="inline-flex overflow-hidden rounded-md border border-slate-800 bg-slate-950/20">
+      <button
+        type="button"
+        onClick={() => onChange("hotspots")}
+        className={cn(
+          "px-3 py-2 text-xs font-semibold",
+          value === "hotspots" ? "bg-orange-500/20 text-orange-200" : "text-slate-200 hover:bg-slate-950/40"
+        )}
+        aria-pressed={value === "hotspots"}
+        title="Hotspot circles"
+      >
+        Hotspots
+      </button>
+      <button
+        type="button"
+        onClick={() => onChange("pins")}
+        className={cn(
+          "px-3 py-2 text-xs font-semibold",
+          value === "pins" ? "bg-orange-500/20 text-orange-200" : "text-slate-200 hover:bg-slate-950/40"
+        )}
+        aria-pressed={value === "pins"}
+        title="Individual pins"
+      >
+        Pins
+      </button>
+    </div>
+  );
+}
+
+// -----------------------------
 // Page
 // -----------------------------
 
 export default function DepartmentDetailPage() {
   const params = useParams<{ id: string }>();
-  const idStr = params?.id;
-  const deptId = Number(idStr);
+  const deptId = Number(params?.id);
 
   const apiBase = getApiBase();
 
@@ -1018,8 +1001,6 @@ export default function DepartmentDetailPage() {
   const [mapNote, setMapNote] = useState<string | null>(null);
 
   const [selectedCluster, setSelectedCluster] = useState<HotspotCluster | null>(null);
-
-  // used by Top Hotspots list to push map focus without refactor
   const [focusCenter, setFocusCenter] = useState<GeoPoint | null>(null);
 
   const [generatedAt, setGeneratedAt] = useState<string>(() => new Date().toISOString());
@@ -1043,7 +1024,7 @@ export default function DepartmentDetailPage() {
     }, 50);
   }
 
-  // Load dept + incidents from backend
+  // Load dept + incidents
   useEffect(() => {
     let cancelled = false;
 
@@ -1061,7 +1042,7 @@ export default function DepartmentDetailPage() {
       setFocusCenter(null);
 
       if (!isValidId) {
-        setError(`Invalid department id: "${idStr}"`);
+        setError(`Invalid department id: "${params?.id}"`);
         setLoading(false);
         setStatusMsg(null);
         return;
@@ -1095,8 +1076,8 @@ export default function DepartmentDetailPage() {
           const t = await incRes.text().catch(() => "");
           throw new Error(`Failed to load incidents (${incRes.status}). ${t}`);
         }
-        const data = (await safeJson(incRes)) as any;
 
+        const data = (await safeJson(incRes)) as any;
         const list: ApiIncident[] = Array.isArray(data)
           ? data.map((x: any) => ({
               id: Number(x.id),
@@ -1128,7 +1109,7 @@ export default function DepartmentDetailPage() {
     return () => {
       cancelled = true;
     };
-  }, [apiBase, deptId, idStr, isValidId]);
+  }, [apiBase, deptId, isValidId, params?.id]);
 
   // Apply time + type filters
   const filteredIncidents = useMemo(() => {
@@ -1147,28 +1128,7 @@ export default function DepartmentDetailPage() {
     });
   }, [incidents, timeRange, typeFilter]);
 
-  // Trend counts (simple for demo)
-  const count30 = useMemo(() => {
-    const start = rangeStartDate("30")!;
-    return incidents.filter((i) => {
-      if (typeFilter !== "all" && classifyIncident(i) !== typeFilter) return false;
-      const ts = i.occurred_at ? new Date(i.occurred_at).getTime() : NaN;
-      if (!Number.isFinite(ts)) return false;
-      return ts >= start.getTime();
-    }).length;
-  }, [incidents, typeFilter]);
-
-  const count90 = useMemo(() => {
-    const start = rangeStartDate("90")!;
-    return incidents.filter((i) => {
-      if (typeFilter !== "all" && classifyIncident(i) !== typeFilter) return false;
-      const ts = i.occurred_at ? new Date(i.occurred_at).getTime() : NaN;
-      if (!Number.isFinite(ts)) return false;
-      return ts >= start.getTime();
-    }).length;
-  }, [incidents, typeFilter]);
-
-  // Geocode department and incidents (demo-safe)
+  // Geocode dept + incidents (demo-safe)
   useEffect(() => {
     let cancelled = false;
     const controller = new AbortController();
@@ -1181,11 +1141,11 @@ export default function DepartmentDetailPage() {
 
       try {
         // Dept center
-        const deptQ = buildDeptQuery(dept);
-        const deptP = deptQ ? await geocodeAddress(deptQ, controller.signal) : null;
+        const qDept = deptQuery(dept);
+        const deptP = qDept ? await geocodeAddress(qDept, controller.signal) : null;
         if (!cancelled) setDeptCenter(deptP);
 
-        // Incident pins (limit to reduce rate-limit risk)
+        // Incident pins (limit for rate-limits)
         const toGeocode = filteredIncidents.slice(0, 40);
 
         const builtPins: IncidentPin[] = [];
@@ -1198,7 +1158,7 @@ export default function DepartmentDetailPage() {
           const p = await geocodeAddress(q, controller.signal);
           if (!p) continue;
 
-          const cKey = typeFilter === "all" ? classifyIncident(inc) : typeFilter;
+          const category = typeFilter === "all" ? classifyIncident(inc) : typeFilter;
 
           builtPins.push({
             incidentId: inc.id,
@@ -1207,18 +1167,16 @@ export default function DepartmentDetailPage() {
             occurredAt: inc.occurred_at,
             lat: p.lat,
             lon: p.lon,
-            categoryKey: cKey,
+            dominantCategory: category,
           });
 
-          // small delay for politeness (demo)
           await new Promise((r) => setTimeout(r, 120));
         }
 
         if (!cancelled) {
           setPins(builtPins);
 
-          const filterText = typeFilter === "all" ? "All categories" : categoryMeta(typeFilter).label;
-
+          const filterText = typeFilterLabel(typeFilter);
           setMapNote(
             builtPins.length > 0
               ? `Showing ${builtPins.length} mapped incident(s) • ${timeRangeLabel(timeRange)} • ${filterText}`
@@ -1241,7 +1199,7 @@ export default function DepartmentDetailPage() {
   }, [dept, filteredIncidents, timeRange, typeFilter]);
 
   const clusters = useMemo(() => computeClusters(pins, 250), [pins]);
-  const topCluster = clusters[0] ?? null;
+  const topHotspots = useMemo(() => clusters.slice(0, 3), [clusters]);
 
   useEffect(() => {
     if (!selectedCluster) return;
@@ -1254,9 +1212,8 @@ export default function DepartmentDetailPage() {
 
   const totalIncidents = incidents.length;
   const showingIncidents = filteredIncidents.length;
-
   const activeFiltersText =
-    `${timeRangeLabel(timeRange)} • ` + (typeFilter === "all" ? "All categories" : categoryMeta(typeFilter).label);
+    `${timeRangeLabel(timeRange)} • ` + (typeFilter === "all" ? "All categories" : typeFilterLabel(typeFilter));
 
   const drilldownPins = useMemo(() => {
     if (!selectedCluster) return [];
@@ -1270,13 +1227,6 @@ export default function DepartmentDetailPage() {
       .slice(0, 24);
   }, [selectedCluster]);
 
-  const deptQueryForLink = dept ? buildDeptQuery(dept) : "";
-  const deptMapLink = deptQueryForLink ? osmSearchUrl(deptQueryForLink) : null;
-
-  const generated = fmtLocalUtc(generatedAt);
-
-  const topHotspots = useMemo(() => clusters.slice(0, 3), [clusters]);
-
   function selectHotspot(c: HotspotCluster) {
     setMapMode("hotspots");
     setSelectedCluster(c);
@@ -1286,11 +1236,11 @@ export default function DepartmentDetailPage() {
     } catch {}
   }
 
-  const cityState = dept ? [dept.city, dept.state].filter(Boolean).join(", ") : "";
+  const deptQueryForLink = dept ? deptQuery(dept) : "";
+  const deptMapLink = deptQueryForLink ? osmSearchUrl(deptQueryForLink) : null;
 
-  // -----------------------------
-  // Render
-  // -----------------------------
+  const generated = fmtLocalUtc(generatedAt);
+  const cityState = dept ? [dept.city, dept.state].filter(Boolean).join(", ") : "";
 
   return (
     <section className="space-y-4">
@@ -1370,24 +1320,8 @@ export default function DepartmentDetailPage() {
           </div>
 
           <div className="print-card print-avoid-break">
-            <h3>Trend</h3>
-            <div className="print-value">
-              {count30} / {count90}
-            </div>
-            <div className="print-note">30d vs 90d (category-aware)</div>
-          </div>
-        </div>
-
-        <div className="print-list">
-          <div className="print-row">
-            <div className="print-k">Top hotspot</div>
-            <div className="print-v">
-              {topCluster ? `${topCluster.count} incidents (dominant: ${categoryMeta(topCluster.dominantCategory).label})` : "—"}
-            </div>
-          </div>
-          <div className="print-row">
-            <div className="print-k">NFPA note</div>
-            <div className="print-v">
+            <h3>NFPA note</h3>
+            <div className="print-note">
               Hotspots indicate density patterns for triage and planning — not cause/origin/conclusions (NFPA-aligned discipline).
             </div>
           </div>
@@ -1482,20 +1416,22 @@ export default function DepartmentDetailPage() {
               </div>
             </div>
 
-            {/* AI Assist panel (AFG/SAFER/CRR) */}
+            {/* AI Assist — Grant Narrative Draft */}
             <GrantNarrativePanel
               departmentName={dept.name}
-              cityState={cityState}
+              city={dept.city ?? ""}
+              state={dept.state ?? ""}
               timeWindowLabel={timeRangeLabel(timeRange)}
-              categoriesLabel={typeFilter === "all" ? "All categories" : categoryMeta(typeFilter).label}
               mappedIncidentsCount={pins.length}
               hotspotsCount={clusters.length}
-              topHotspotCount={clusters[0]?.count ?? 0}
-              trend30={count30}
-              trend90={count90}
+              categoriesLabel={typeFilterLabel(typeFilter)}
+              topHotspots={topHotspots.map((c) => ({
+                count: c.count,
+                dominantLabel: typeFilterLabel(c.dominantCategory),
+                radiusMeters: c.radiusMeters,
+              }))}
             />
 
-            {/* Map panel */}
             <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
               <div className="flex items-start justify-between gap-3">
                 <div>
@@ -1554,7 +1490,6 @@ export default function DepartmentDetailPage() {
                 </div>
               </div>
 
-              {/* anchor used by Top Hotspots Select */}
               <div id="hotspot-map-anchor" />
 
               <div className="mt-3 overflow-hidden rounded-md border border-slate-800 bg-slate-950/30">
@@ -1563,7 +1498,6 @@ export default function DepartmentDetailPage() {
                   focusCenter={focusCenter}
                   pins={pins}
                   clusters={clusters}
-                  departmentId={dept.id}
                   mode={mapMode}
                   onHotspotClick={(c) => {
                     setSelectedCluster(c);
@@ -1581,13 +1515,14 @@ export default function DepartmentDetailPage() {
                 </div>
               </div>
 
-              {/* Top Hotspots ranked list */}
               {mapMode === "hotspots" ? (
                 <div className="mt-3 rounded-md border border-slate-800 bg-slate-950/20 p-3">
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <div className="text-[10px] uppercase tracking-wide text-slate-400">Top hotspots (mapped)</div>
-                      <div className="mt-1 text-[11px] text-slate-500">Ranked by incident count. Select to zoom + open drilldown.</div>
+                      <div className="mt-1 text-[11px] text-slate-500">
+                        Ranked by incident count. Select to zoom + open drilldown.
+                      </div>
                     </div>
                     {selectedCluster ? (
                       <button
@@ -1606,10 +1541,12 @@ export default function DepartmentDetailPage() {
 
                   <div className="mt-3 grid gap-2 md:grid-cols-3">
                     {topHotspots.length === 0 ? (
-                      <div className="text-xs text-slate-400">No hotspots available yet (need at least 2 mapped pins nearby).</div>
+                      <div className="text-xs text-slate-400">
+                        No hotspots available yet (need at least 2 mapped pins nearby).
+                      </div>
                     ) : (
                       topHotspots.map((c) => {
-                        const meta = categoryMeta(c.dominantCategory);
+                        const color = typeFilterColor(c.dominantCategory);
                         const active = selectedCluster?.id === c.id;
                         return (
                           <button
@@ -1618,7 +1555,9 @@ export default function DepartmentDetailPage() {
                             onClick={() => selectHotspot(c)}
                             className={cn(
                               "rounded-md border p-3 text-left",
-                              active ? "border-orange-400/60 bg-orange-500/10" : "border-slate-800 bg-slate-950/20 hover:border-slate-700"
+                              active
+                                ? "border-orange-400/60 bg-orange-500/10"
+                                : "border-slate-800 bg-slate-950/20 hover:border-slate-700"
                             )}
                             title="Zoom to hotspot + open drilldown"
                           >
@@ -1626,12 +1565,14 @@ export default function DepartmentDetailPage() {
                               <div className="text-xs font-semibold text-slate-100">Hotspot</div>
                               <div
                                 className="rounded-full px-2 py-0.5 text-[11px] font-extrabold"
-                                style={{ border: `1px solid ${meta.pinColor}`, color: meta.pinColor }}
+                                style={{ border: `1px solid ${color}`, color }}
                               >
                                 {c.count}
                               </div>
                             </div>
-                            <div className="mt-1 text-[11px] text-slate-400">Dominant: {meta.label}</div>
+                            <div className="mt-1 text-[11px] text-slate-400">
+                              Dominant: {typeFilterLabel(c.dominantCategory)}
+                            </div>
                             <div className="mt-1 text-[11px] text-slate-500">Radius ~{Math.round(c.radiusMeters)}m</div>
                           </button>
                         );
@@ -1642,14 +1583,14 @@ export default function DepartmentDetailPage() {
               ) : null}
             </div>
 
-            {/* Drilldown panel */}
             {selectedCluster ? (
               <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
                     <div className="text-sm font-semibold text-slate-100">Hotspot drilldown</div>
                     <div className="mt-1 text-[11px] text-slate-400">
-                      {selectedCluster.count} incident(s) • Dominant: {categoryMeta(selectedCluster.dominantCategory).label} • Showing up to 24 most recent
+                      {selectedCluster.count} incident(s) • Dominant: {typeFilterLabel(selectedCluster.dominantCategory)} •
+                      Showing up to 24 most recent
                     </div>
                   </div>
 
@@ -1669,7 +1610,7 @@ export default function DepartmentDetailPage() {
                 <div className="mt-3 grid gap-2 md:grid-cols-2">
                   {drilldownPins.map((p) => {
                     const when = p.occurredAt ? fmtLocalUtc(p.occurredAt).local : "—";
-                    const meta = categoryMeta(p.categoryKey);
+                    const color = typeFilterColor(p.dominantCategory);
                     return (
                       <Link
                         key={`${selectedCluster.id}:${p.incidentId}`}
@@ -1679,8 +1620,8 @@ export default function DepartmentDetailPage() {
                       >
                         <div className="flex items-start justify-between gap-2">
                           <div className="text-xs font-semibold text-slate-100">Incident #{p.incidentId}</div>
-                          <div className="text-[11px] font-semibold" style={{ color: meta.pinColor }}>
-                            {meta.label}
+                          <div className="text-[11px] font-semibold" style={{ color }}>
+                            {typeFilterLabel(p.dominantCategory)}
                           </div>
                         </div>
                         <div className="mt-1 text-[11px] text-slate-400">{p.addressLine}</div>
