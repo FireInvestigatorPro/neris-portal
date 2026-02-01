@@ -82,7 +82,12 @@ type GrantNarrativeInputs = {
   mappedIncidentsCount: number;
   hotspotsCount: number;
   categoriesLabel: string;
-  topHotspots: Array<{ count: number; dominantLabel: string; radiusMeters: number }>;
+  topHotspots: Array<{
+    count: number;
+    dominantLabel: string;
+    radiusMeters: number;
+    placeLabel?: string;
+  }>;
 };
 
 // -----------------------------
@@ -94,15 +99,12 @@ function cn(...classes: Array<string | false | null | undefined>) {
 }
 
 function getApiBase() {
-  // Prefer the env var you already use in Vercel
   const fromUrl = process.env.NEXT_PUBLIC_API_BASE_URL?.trim();
   if (fromUrl) return fromUrl.replace(/\/+$/, "");
 
-  // Back-compat
   const fromBase = process.env.NEXT_PUBLIC_API_BASE?.trim();
   if (fromBase) return fromBase.replace(/\/+$/, "");
 
-  // Demo-safe fallback
   return "https://infernointelai-backend.onrender.com";
 }
 
@@ -283,6 +285,89 @@ async function geocodeAddress(q: string, signal?: AbortSignal): Promise<GeoPoint
 }
 
 // -----------------------------
+// Reverse geocoding for hotspot labels (Nominatim reverse) + cache
+// -----------------------------
+
+function reverseCacheKey(lat: number, lon: number) {
+  // reduce precision so nearby points share cache
+  const key = `${lat.toFixed(4)},${lon.toFixed(4)}`;
+  return `revgeo:v1:${key}`;
+}
+
+function readReverseCache(lat: number, lon: number): string | null {
+  try {
+    return localStorage.getItem(reverseCacheKey(lat, lon));
+  } catch {
+    return null;
+  }
+}
+
+function writeReverseCache(lat: number, lon: number, label: string) {
+  try {
+    localStorage.setItem(reverseCacheKey(lat, lon), label);
+  } catch {
+    // ignore
+  }
+}
+
+function pickPlaceLabel(addr: any) {
+  // prefer neighborhood-ish signals, then road-ish, then city-ish
+  const hood =
+    addr?.neighbourhood ||
+    addr?.suburb ||
+    addr?.quarter ||
+    addr?.hamlet ||
+    addr?.village ||
+    addr?.town ||
+    addr?.city ||
+    addr?.county;
+
+  const road = addr?.road || addr?.pedestrian || addr?.residential || addr?.path;
+  const place =
+    addr?.city || addr?.town || addr?.village || addr?.hamlet || addr?.county || addr?.state;
+
+  // If we have both hood and road and they differ, we can do "Hood — Road"
+  if (hood && road && String(hood) !== String(road)) return `${hood} — ${road}`;
+  if (hood) return String(hood);
+  if (road && place) return `${road}, ${place}`;
+  if (road) return String(road);
+  if (place) return String(place);
+  return null;
+}
+
+async function reverseGeocodeLabel(p: GeoPoint, signal?: AbortSignal): Promise<string | null> {
+  const cached = readReverseCache(p.lat, p.lon);
+  if (cached) return cached;
+
+  const url = new URL("https://nominatim.openstreetmap.org/reverse");
+  url.searchParams.set("format", "json");
+  url.searchParams.set("lat", String(p.lat));
+  url.searchParams.set("lon", String(p.lon));
+  url.searchParams.set("zoom", "16");
+  url.searchParams.set("addressdetails", "1");
+
+  const res = await fetch(url.toString(), {
+    method: "GET",
+    headers: { "Accept-Language": "en" },
+    signal,
+  });
+
+  if (!res.ok) return null;
+
+  const data = (await res.json().catch(() => null)) as any;
+  const label = pickPlaceLabel(data?.address) || data?.name || null;
+
+  if (label && typeof label === "string") {
+    const trimmed = label.trim();
+    if (trimmed) {
+      writeReverseCache(p.lat, p.lon, trimmed);
+      return trimmed;
+    }
+  }
+  return null;
+}
+
+// -----------------------------
 // Hotspot clustering
 // -----------------------------
 
@@ -435,12 +520,12 @@ function buildCrrBrief(i: GrantNarrativeInputs) {
   const topLines =
     top.length === 0
       ? ["• No hotspot clusters available in the current mapped preview."]
-      : top.map(
-          (h, idx) =>
-            `• Hotspot ${idx + 1}: ${h.count} incident(s) (dominant: ${h.dominantLabel}) • radius ~${Math.round(
-              h.radiusMeters
-            )}m`
-        );
+      : top.map((h, idx) => {
+          const place = h.placeLabel ? ` (near ${h.placeLabel})` : "";
+          return `• Hotspot ${idx + 1}: ${h.count} incident(s)${place} (dominant: ${h.dominantLabel}) • radius ~${Math.round(
+            h.radiusMeters
+          )}m`;
+        });
 
   return [
     `CRR Executive Brief – Draft (Demo “AI Assist”)`,
@@ -495,12 +580,12 @@ function GrantNarrativePanel(props: GrantNarrativeInputs) {
     const lines =
       top.length === 0
         ? ["• No hotspot clusters available in the current mapped preview."]
-        : top.map(
-            (h, idx) =>
-              `• Hotspot ${idx + 1}: ${h.count} incident(s) (dominant: ${h.dominantLabel}) • radius ~${Math.round(
-                h.radiusMeters
-              )}m`
-          );
+        : top.map((h, idx) => {
+            const place = h.placeLabel ? ` (near ${h.placeLabel})` : "";
+            return `• Hotspot ${idx + 1}: ${h.count} incident(s)${place} (dominant: ${h.dominantLabel}) • radius ~${Math.round(
+              h.radiusMeters
+            )}m`;
+          });
 
     setDraft((prev) => {
       const marker = "Top Hotspots (Mapped Preview)";
@@ -1003,6 +1088,9 @@ export default function DepartmentDetailPage() {
   const [selectedCluster, setSelectedCluster] = useState<HotspotCluster | null>(null);
   const [focusCenter, setFocusCenter] = useState<GeoPoint | null>(null);
 
+  // NEW: hotspot reverse-geocode labels by cluster id
+  const [hotspotLabels, setHotspotLabels] = useState<Record<string, string>>({});
+
   const [generatedAt, setGeneratedAt] = useState<string>(() => new Date().toISOString());
 
   const isValidId = useMemo(() => Number.isFinite(deptId) && deptId > 0, [deptId]);
@@ -1040,6 +1128,7 @@ export default function DepartmentDetailPage() {
       setMapNote(null);
       setSelectedCluster(null);
       setFocusCenter(null);
+      setHotspotLabels({});
 
       if (!isValidId) {
         setError(`Invalid department id: "${params?.id}"`);
@@ -1201,6 +1290,50 @@ export default function DepartmentDetailPage() {
   const clusters = useMemo(() => computeClusters(pins, 250), [pins]);
   const topHotspots = useMemo(() => clusters.slice(0, 3), [clusters]);
 
+  // NEW: reverse-geocode top hotspots + selected hotspot (if needed)
+  useEffect(() => {
+    let cancelled = false;
+    const controller = new AbortController();
+
+    async function labelClusters() {
+      const targets: HotspotCluster[] = [];
+
+      for (const c of topHotspots) targets.push(c);
+
+      if (selectedCluster && !targets.some((t) => t.id === selectedCluster.id)) {
+        targets.push(selectedCluster);
+      }
+
+      // Only fetch labels we don't already have
+      const toFetch = targets.filter((c) => !hotspotLabels[c.id]);
+
+      for (const c of toFetch) {
+        if (cancelled) break;
+        try {
+          const label = await reverseGeocodeLabel(c.center, controller.signal);
+          if (label && !cancelled) {
+            setHotspotLabels((prev) => ({ ...prev, [c.id]: label }));
+          }
+        } catch {
+          // ignore (demo-safe)
+        }
+
+        // small delay to respect Nominatim usage (demo friendliness)
+        await new Promise((r) => setTimeout(r, 140));
+      }
+    }
+
+    // Only run when we actually have clusters
+    if (topHotspots.length > 0 || selectedCluster) {
+      labelClusters();
+    }
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [topHotspots, selectedCluster, hotspotLabels]);
+
   useEffect(() => {
     if (!selectedCluster) return;
     const stillExists = clusters.some((c) => c.id === selectedCluster.id);
@@ -1242,6 +1375,15 @@ export default function DepartmentDetailPage() {
   const generated = fmtLocalUtc(generatedAt);
   const cityState = dept ? [dept.city, dept.state].filter(Boolean).join(", ") : "";
 
+  const topHotspotsForAi = useMemo(() => {
+    return topHotspots.map((c) => ({
+      count: c.count,
+      dominantLabel: typeFilterLabel(c.dominantCategory),
+      radiusMeters: c.radiusMeters,
+      placeLabel: hotspotLabels[c.id],
+    }));
+  }, [topHotspots, hotspotLabels]);
+
   return (
     <section className="space-y-4">
       {/* Print styles + print-only brief */}
@@ -1275,12 +1417,6 @@ export default function DepartmentDetailPage() {
           .print-value { font-size: 18px; font-weight: 800; color: #0f172a; }
           .print-note { font-size: 11px; color: #334155; margin-top: 10px; }
 
-          .print-list { margin-top: 10px; }
-          .print-row { display: grid; grid-template-columns: 110px 1fr; gap: 10px; padding: 8px 0; border-top: 1px solid #f1f5f9; }
-          .print-row:first-child { border-top: 0; }
-          .print-k { font-size: 11px; color: #475569; }
-          .print-v { font-size: 12px; color: #0f172a; font-weight: 600; }
-
           .print-footer { margin-top: 18px; padding-top: 10px; border-top: 1px solid #e2e8f0; font-size: 10px; color: #475569; }
         }
       `}</style>
@@ -1300,35 +1436,8 @@ export default function DepartmentDetailPage() {
           ) : null}
         </div>
 
-        <div className="print-grid">
-          <div className="print-card print-avoid-break">
-            <h3>Volume</h3>
-            <div className="print-value">{showingIncidents}</div>
-            <div className="print-note">Incidents matching current filters</div>
-          </div>
-
-          <div className="print-card print-avoid-break">
-            <h3>Mapped Preview</h3>
-            <div className="print-value">{pins.length}</div>
-            <div className="print-note">Mapped pins (demo subset)</div>
-          </div>
-
-          <div className="print-card print-avoid-break">
-            <h3>Hotspots</h3>
-            <div className="print-value">{clusters.length}</div>
-            <div className="print-note">Cluster(s) from mapped pins</div>
-          </div>
-
-          <div className="print-card print-avoid-break">
-            <h3>NFPA note</h3>
-            <div className="print-note">
-              Hotspots indicate density patterns for triage and planning — not cause/origin/conclusions (NFPA-aligned discipline).
-            </div>
-          </div>
-        </div>
-
         <div className="print-footer">
-          Demo artifact. Future versions will add validated NERIS mappings, confidence scoring, and export packages for grant and CRR workflows.
+          Demo artifact. Hotspots indicate density patterns only and are not cause/origin conclusions (NFPA-aligned discipline).
         </div>
       </div>
 
@@ -1396,26 +1505,6 @@ export default function DepartmentDetailPage() {
 
         {!loading && dept ? (
           <>
-            <div className="grid gap-4 md:grid-cols-3">
-              <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
-                <div className="text-[10px] uppercase tracking-wide text-slate-400">Incidents</div>
-                <div className="mt-1 text-2xl font-extrabold text-slate-100">{totalIncidents}</div>
-                <div className="mt-1 text-xs text-slate-400">Total incidents loaded</div>
-              </div>
-
-              <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
-                <div className="text-[10px] uppercase tracking-wide text-slate-400">Filtered view</div>
-                <div className="mt-1 text-2xl font-extrabold text-slate-100">{showingIncidents}</div>
-                <div className="mt-1 text-xs text-slate-400">{activeFiltersText}</div>
-              </div>
-
-              <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
-                <div className="text-[10px] uppercase tracking-wide text-slate-400">Mapped pins</div>
-                <div className="mt-1 text-2xl font-extrabold text-slate-100">{pins.length}</div>
-                <div className="mt-1 text-xs text-slate-400">Geocoded incident address subset (demo)</div>
-              </div>
-            </div>
-
             {/* AI Assist — Grant Narrative Draft */}
             <GrantNarrativePanel
               departmentName={dept.name}
@@ -1425,11 +1514,7 @@ export default function DepartmentDetailPage() {
               mappedIncidentsCount={pins.length}
               hotspotsCount={clusters.length}
               categoriesLabel={typeFilterLabel(typeFilter)}
-              topHotspots={topHotspots.map((c) => ({
-                count: c.count,
-                dominantLabel: typeFilterLabel(c.dominantCategory),
-                radiusMeters: c.radiusMeters,
-              }))}
+              topHotspots={topHotspotsForAi}
             />
 
             <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
@@ -1453,44 +1538,6 @@ export default function DepartmentDetailPage() {
                   }}
                 />
               </div>
-
-              <div className="mt-3 rounded-md border border-slate-800 bg-slate-950/20 p-3 space-y-3">
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div>
-                    <div className="text-[10px] uppercase tracking-wide text-slate-400">Time window</div>
-                    <div className="mt-1 text-[11px] text-slate-300">
-                      Showing <span className="text-slate-100">{showingIncidents}</span> of{" "}
-                      <span className="text-slate-100">{totalIncidents}</span> incidents
-                    </div>
-                  </div>
-                  <TimeFilterChips value={timeRange} onChange={setTimeRange} />
-                </div>
-
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div>
-                    <div className="text-[10px] uppercase tracking-wide text-slate-400">Category filter</div>
-                    <div className="mt-1 text-[11px] text-slate-300">Active: {activeFiltersText}</div>
-                  </div>
-                  <TypeFilterChips value={typeFilter} onChange={setTypeFilter} />
-                </div>
-
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div className="text-[11px] text-slate-500">
-                    <span className="text-slate-200 font-semibold">Pin colors:</span>{" "}
-                    Fire (red), EMS (green), HazMat (purple), Service (blue), False Alarm (amber), Other (gray).
-                  </div>
-                  <button
-                    type="button"
-                    className="rounded-md border border-slate-800 bg-slate-950/30 px-3 py-2 text-xs font-semibold text-slate-100 hover:border-orange-400"
-                    onClick={resetFilters}
-                    title="Reset to defaults"
-                  >
-                    Reset
-                  </button>
-                </div>
-              </div>
-
-              <div id="hotspot-map-anchor" />
 
               <div className="mt-3 overflow-hidden rounded-md border border-slate-800 bg-slate-950/30">
                 <HotspotLeafletMap
@@ -1517,27 +1564,8 @@ export default function DepartmentDetailPage() {
 
               {mapMode === "hotspots" ? (
                 <div className="mt-3 rounded-md border border-slate-800 bg-slate-950/20 p-3">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <div className="text-[10px] uppercase tracking-wide text-slate-400">Top hotspots (mapped)</div>
-                      <div className="mt-1 text-[11px] text-slate-500">
-                        Ranked by incident count. Select to zoom + open drilldown.
-                      </div>
-                    </div>
-                    {selectedCluster ? (
-                      <button
-                        type="button"
-                        className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100 hover:border-orange-400"
-                        onClick={() => {
-                          setSelectedCluster(null);
-                          setFocusCenter(null);
-                        }}
-                        title="Clear selection"
-                      >
-                        Clear selection
-                      </button>
-                    ) : null}
-                  </div>
+                  <div className="text-[10px] uppercase tracking-wide text-slate-400">Top hotspots (mapped)</div>
+                  <div className="mt-1 text-[11px] text-slate-500">Now labeled using OpenStreetMap reverse-geocoding (cached).</div>
 
                   <div className="mt-3 grid gap-2 md:grid-cols-3">
                     {topHotspots.length === 0 ? (
@@ -1548,6 +1576,7 @@ export default function DepartmentDetailPage() {
                       topHotspots.map((c) => {
                         const color = typeFilterColor(c.dominantCategory);
                         const active = selectedCluster?.id === c.id;
+                        const place = hotspotLabels[c.id];
                         return (
                           <button
                             key={c.id}
@@ -1570,10 +1599,21 @@ export default function DepartmentDetailPage() {
                                 {c.count}
                               </div>
                             </div>
+
                             <div className="mt-1 text-[11px] text-slate-400">
                               Dominant: {typeFilterLabel(c.dominantCategory)}
                             </div>
-                            <div className="mt-1 text-[11px] text-slate-500">Radius ~{Math.round(c.radiusMeters)}m</div>
+
+                            <div className="mt-1 text-[11px] text-slate-500">
+                              {place ? (
+                                <>
+                                  Near <span className="text-slate-200 font-semibold">{place}</span> •{" "}
+                                </>
+                              ) : (
+                                <>Labeling… • </>
+                              )}
+                              Radius ~{Math.round(c.radiusMeters)}m
+                            </div>
                           </button>
                         );
                       })
@@ -1589,8 +1629,14 @@ export default function DepartmentDetailPage() {
                   <div>
                     <div className="text-sm font-semibold text-slate-100">Hotspot drilldown</div>
                     <div className="mt-1 text-[11px] text-slate-400">
-                      {selectedCluster.count} incident(s) • Dominant: {typeFilterLabel(selectedCluster.dominantCategory)} •
-                      Showing up to 24 most recent
+                      {selectedCluster.count} incident(s)
+                      {hotspotLabels[selectedCluster.id] ? (
+                        <>
+                          {" "}
+                          • near <span className="text-slate-200 font-semibold">{hotspotLabels[selectedCluster.id]}</span>
+                        </>
+                      ) : null}{" "}
+                      • Dominant: {typeFilterLabel(selectedCluster.dominantCategory)}
                     </div>
                   </div>
 
