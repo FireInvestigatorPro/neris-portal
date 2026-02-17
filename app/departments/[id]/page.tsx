@@ -36,7 +36,11 @@ type ApiIncident = {
   state: string | null;
   department_id: number;
   neris_incident_id?: string | null;
-  incident_type_code?: string | null;
+
+  // Back-compat + new backend fields
+  incident_type_code?: string | null; // older frontend/backends
+  neris_incident_type_code?: string | null; // new backend
+  incident_type_description?: string | null; // new backend
 };
 
 type GeoPoint = { lat: number; lon: number };
@@ -174,17 +178,48 @@ function osmSearchUrl(q: string) {
   return u.toString();
 }
 
+function milesToMeters(mi: number) {
+  return mi * 1609.344;
+}
+
+type HotspotRadiusMiles = 0.25 | 0.5 | 1.0;
+
+function radiusLabel(mi: HotspotRadiusMiles) {
+  return mi === 1.0 ? "1 mile" : `${mi} mile`;
+}
+
 /**
  * Demo category mapping.
  * In a real build we’ll map exact NERIS incident codes → controlled taxonomy.
+ *
+ * We now support:
+ * - incident_type_description (best signal for demo filters)
+ * - neris_incident_type_code / incident_type_code (fallback)
  */
 function classifyIncident(i: ApiIncident): TypeFilterKey {
-  const t = (i.incident_type_code ?? "").toLowerCase();
-  if (t.includes("fire")) return "fire";
-  if (t.includes("ems") || t.includes("medical")) return "ems";
-  if (t.includes("haz")) return "hazmat";
-  if (t.includes("service") || t.includes("assist")) return "service";
-  if (t.includes("false") || t.includes("alarm")) return "false_alarm";
+  const desc = (i.incident_type_description ?? "").toLowerCase();
+  const code =
+    (i.neris_incident_type_code ?? i.incident_type_code ?? "").toString().toLowerCase();
+
+  const t = `${desc} ${code}`.trim();
+
+  // description-based heuristics (demo-safe)
+  if (t.includes("fire") || t.includes("smoke") || t.includes("burn")) return "fire";
+  if (t.includes("ems") || t.includes("medical") || t.includes("injur") || t.includes("overdose")) return "ems";
+  if (t.includes("haz") || t.includes("spill") || t.includes("leak")) return "hazmat";
+  if (t.includes("service") || t.includes("assist") || t.includes("public")) return "service";
+  if (t.includes("false") || t.includes("alarm") || t.includes("malfunction")) return "false_alarm";
+
+  // numeric-ish fallback (very coarse; demo-only)
+  // Many coding schemes group fires into lower codes; we keep this conservative.
+  if (/^\d+/.test(code)) {
+    const first = code.trim()[0];
+    if (first === "1") return "fire";
+    if (first === "3") return "ems";
+    if (first === "4") return "service";
+    if (first === "5") return "false_alarm";
+  }
+
   return "other";
 }
 
@@ -377,7 +412,7 @@ function haversineMeters(a: GeoPoint, b: GeoPoint) {
   const dLat = toRad(b.lat - a.lat);
   const dLon = toRad(b.lon - a.lon);
   const lat1 = toRad(a.lat);
-  const lat2 = toRad(b.lat);
+  const lat2 = toRad(a.lat);
 
   const sin1 = Math.sin(dLat / 2);
   const sin2 = Math.sin(dLon / 2);
@@ -400,7 +435,9 @@ function computeClusters(pins: IncidentPin[], thresholdMeters: number): HotspotC
       for (let i = unused.length - 1; i >= 0; i--) {
         const p = unused[i];
         const closeToAny = group.some(
-          (g) => haversineMeters({ lat: g.lat, lon: g.lon }, { lat: p.lat, lon: p.lon }) <= thresholdMeters
+          (g) =>
+            haversineMeters({ lat: g.lat, lon: g.lon }, { lat: p.lat, lon: p.lon }) <=
+            thresholdMeters
         );
         if (closeToAny) {
           group.push(p);
@@ -414,10 +451,11 @@ function computeClusters(pins: IncidentPin[], thresholdMeters: number): HotspotC
     const avgLon = group.reduce((s, p) => s + p.lon, 0) / group.length;
     const center: GeoPoint = { lat: avgLat, lon: avgLon };
 
-    const radius = Math.max(
-      120,
-      group.reduce((mx, p) => Math.max(mx, haversineMeters(center, { lat: p.lat, lon: p.lon })), 0) + 80
-    );
+    const computedRadius =
+      group.reduce((mx, p) => Math.max(mx, haversineMeters(center, { lat: p.lat, lon: p.lon })), 0) + 80;
+
+    // Ensure visual circle stays meaningful at small counts and reflects chosen radius threshold
+    const radius = Math.max(120, computedRadius, thresholdMeters);
 
     const counts = new Map<TypeFilterKey, number>();
     for (const p of group) counts.set(p.dominantCategory, (counts.get(p.dominantCategory) ?? 0) + 1);
@@ -702,9 +740,7 @@ function GrantNarrativePanel(props: GrantNarrativeInputs) {
               <span className="text-slate-400">Hotspots:</span> {props.hotspotsCount} cluster(s)
             </div>
           </div>
-          <div className="mt-3 text-[10px] text-slate-500">
-            NFPA note: density patterns ≠ cause/origin conclusions.
-          </div>
+          <div className="mt-3 text-[10px] text-slate-500">NFPA note: density patterns ≠ cause/origin conclusions.</div>
         </div>
 
         <div className="md:col-span-2">
@@ -1060,6 +1096,34 @@ function MapModeToggle({ value, onChange }: { value: MapMode; onChange: (v: MapM
   );
 }
 
+function HotspotRadiusSelect({
+  value,
+  onChange,
+}: {
+  value: HotspotRadiusMiles;
+  onChange: (v: HotspotRadiusMiles) => void;
+}) {
+  const opts: HotspotRadiusMiles[] = [0.25, 0.5, 1.0];
+
+  return (
+    <div className="flex items-center gap-2">
+      <div className="text-[11px] text-slate-400">Hotspot radius</div>
+      <select
+        className="rounded-md border border-slate-800 bg-slate-950/30 px-2 py-1 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-orange-500/40"
+        value={String(value)}
+        onChange={(e) => onChange(Number(e.target.value) as HotspotRadiusMiles)}
+        aria-label="Hotspot radius"
+      >
+        {opts.map((mi) => (
+          <option key={mi} value={mi}>
+            {radiusLabel(mi)}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
 // -----------------------------
 // Page
 // -----------------------------
@@ -1080,6 +1144,9 @@ export default function DepartmentDetailPage() {
   const [mapMode, setMapMode] = useState<MapMode>("hotspots");
   const [typeFilter, setTypeFilter] = useState<TypeFilterKey>("all");
 
+  // NEW: adjustable clustering radius (miles)
+  const [hotspotRadiusMiles, setHotspotRadiusMiles] = useState<HotspotRadiusMiles>(0.5);
+
   const [deptCenter, setDeptCenter] = useState<GeoPoint | null>(null);
   const [pins, setPins] = useState<IncidentPin[]>([]);
   const [mapLoading, setMapLoading] = useState(false);
@@ -1098,6 +1165,7 @@ export default function DepartmentDetailPage() {
   function resetFilters() {
     setTimeRange("90");
     setTypeFilter("all");
+    setHotspotRadiusMiles(0.5);
     setMapMode("hotspots");
     setSelectedCluster(null);
     setFocusCenter(null);
@@ -1176,7 +1244,11 @@ export default function DepartmentDetailPage() {
               state: x.state ?? null,
               department_id: Number(x.department_id),
               neris_incident_id: x.neris_incident_id ?? null,
+
+              // Back-compat + new fields
               incident_type_code: x.incident_type_code ?? null,
+              neris_incident_type_code: x.neris_incident_type_code ?? null,
+              incident_type_description: x.incident_type_description ?? null,
             }))
           : [];
 
@@ -1268,8 +1340,12 @@ export default function DepartmentDetailPage() {
           const filterText = typeFilterLabel(typeFilter);
           setMapNote(
             builtPins.length > 0
-              ? `Showing ${builtPins.length} mapped incident(s) • ${timeRangeLabel(timeRange)} • ${filterText}`
-              : `No mappable incident addresses found (or geocode limits) • ${timeRangeLabel(timeRange)} • ${filterText}`
+              ? `Showing ${builtPins.length} mapped incident(s) • ${timeRangeLabel(timeRange)} • ${filterText} • Radius ${radiusLabel(
+                  hotspotRadiusMiles
+                )}`
+              : `No mappable incident addresses found (or geocode limits) • ${timeRangeLabel(timeRange)} • ${filterText} • Radius ${radiusLabel(
+                  hotspotRadiusMiles
+                )}`
           );
         }
       } catch {
@@ -1285,12 +1361,14 @@ export default function DepartmentDetailPage() {
       cancelled = true;
       controller.abort();
     };
-  }, [dept, filteredIncidents, timeRange, typeFilter]);
+  }, [dept, filteredIncidents, timeRange, typeFilter, hotspotRadiusMiles]);
 
-  const clusters = useMemo(() => computeClusters(pins, 250), [pins]);
+  const hotspotThresholdMeters = useMemo(() => milesToMeters(hotspotRadiusMiles), [hotspotRadiusMiles]);
+
+  const clusters = useMemo(() => computeClusters(pins, hotspotThresholdMeters), [pins, hotspotThresholdMeters]);
   const topHotspots = useMemo(() => clusters.slice(0, 3), [clusters]);
 
-  // NEW: reverse-geocode top hotspots + selected hotspot (if needed)
+  // Reverse-geocode top hotspots + selected hotspot (if needed)
   useEffect(() => {
     let cancelled = false;
     const controller = new AbortController();
@@ -1304,7 +1382,6 @@ export default function DepartmentDetailPage() {
         targets.push(selectedCluster);
       }
 
-      // Only fetch labels we don't already have
       const toFetch = targets.filter((c) => !hotspotLabels[c.id]);
 
       for (const c of toFetch) {
@@ -1318,12 +1395,10 @@ export default function DepartmentDetailPage() {
           // ignore (demo-safe)
         }
 
-        // small delay to respect Nominatim usage (demo friendliness)
         await new Promise((r) => setTimeout(r, 140));
       }
     }
 
-    // Only run when we actually have clusters
     if (topHotspots.length > 0 || selectedCluster) {
       labelClusters();
     }
@@ -1343,8 +1418,6 @@ export default function DepartmentDetailPage() {
     }
   }, [clusters, selectedCluster]);
 
-  const totalIncidents = incidents.length;
-  const showingIncidents = filteredIncidents.length;
   const activeFiltersText =
     `${timeRangeLabel(timeRange)} • ` + (typeFilter === "all" ? "All categories" : typeFilterLabel(typeFilter));
 
@@ -1427,7 +1500,8 @@ export default function DepartmentDetailPage() {
           {dept ? dept.name : "Department"} • {dept ? [dept.city, dept.state].filter(Boolean).join(", ") : ""}
         </div>
         <div className="print-meta">
-          Generated: <strong>{generated.local}</strong> • Filters: <strong>{activeFiltersText}</strong>
+          Generated: <strong>{generated.local}</strong> • Filters: <strong>{activeFiltersText}</strong> • Radius:{" "}
+          <strong>{radiusLabel(hotspotRadiusMiles)}</strong>
           {dept?.neris_department_id ? (
             <>
               {" "}
@@ -1518,7 +1592,7 @@ export default function DepartmentDetailPage() {
             />
 
             <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
-              <div className="flex items-start justify-between gap-3">
+              <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <div className="text-sm font-semibold text-slate-100">NERIS Hotspot Intelligence Map</div>
                   <div className="mt-1 text-[11px] text-slate-400">
@@ -1527,16 +1601,78 @@ export default function DepartmentDetailPage() {
                   </div>
                 </div>
 
-                <MapModeToggle
-                  value={mapMode}
-                  onChange={(v) => {
-                    setMapMode(v);
-                    if (v === "pins") {
-                      setSelectedCluster(null);
-                      setFocusCenter(null);
-                    }
-                  }}
-                />
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={resetFilters}
+                    className="rounded-md border border-slate-800 bg-slate-950/30 px-3 py-2 text-xs font-semibold text-slate-100 hover:border-orange-400"
+                    title="Reset filters"
+                  >
+                    Reset
+                  </button>
+                  <MapModeToggle
+                    value={mapMode}
+                    onChange={(v) => {
+                      setMapMode(v);
+                      if (v === "pins") {
+                        setSelectedCluster(null);
+                        setFocusCenter(null);
+                      }
+                    }}
+                  />
+                </div>
+              </div>
+
+              {/* ✅ Filters UI (restored) */}
+              <div className="mt-3 rounded-md border border-slate-800 bg-slate-950/20 p-3">
+                <div className="grid gap-3 md:grid-cols-3">
+                  <div>
+                    <div className="text-[10px] uppercase tracking-wide text-slate-400">Time window</div>
+                    <div className="mt-2">
+                      <TimeFilterChips
+                        value={timeRange}
+                        onChange={(v) => {
+                          setTimeRange(v);
+                          setSelectedCluster(null);
+                          setFocusCenter(null);
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="md:col-span-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <div className="text-[10px] uppercase tracking-wide text-slate-400">Incident type</div>
+                        <div className="mt-2">
+                          <TypeFilterChips
+                            value={typeFilter}
+                            onChange={(v) => {
+                              setTypeFilter(v);
+                              setSelectedCluster(null);
+                              setFocusCenter(null);
+                            }}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-3">
+                        <HotspotRadiusSelect
+                          value={hotspotRadiusMiles}
+                          onChange={(v) => {
+                            setHotspotRadiusMiles(v);
+                            setSelectedCluster(null);
+                            setFocusCenter(null);
+                          }}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="mt-2 text-[11px] text-slate-500">
+                      Filters update pins, hotspots, drilldown, and AI Assist counts live.
+                    </div>
+                  </div>
+                </div>
               </div>
 
               <div className="mt-3 overflow-hidden rounded-md border border-slate-800 bg-slate-950/30">
@@ -1558,7 +1694,9 @@ export default function DepartmentDetailPage() {
                 <div className="text-[11px] text-slate-500">
                   {mapMode === "pins"
                     ? "Pins: click a dot to open an incident."
-                    : `Hotspots: ${clusters.length} cluster(s) from ${pins.length} pin(s). Click a circle/badge OR use Top Hotspots below.`}
+                    : `Hotspots: ${clusters.length} cluster(s) from ${pins.length} pin(s). Radius ${radiusLabel(
+                        hotspotRadiusMiles
+                      )}. Click a circle/badge OR use Top Hotspots below.`}
                 </div>
               </div>
 
