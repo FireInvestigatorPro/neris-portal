@@ -188,10 +188,6 @@ function radiusLabel(mi: HotspotRadiusMiles) {
   return mi === 1.0 ? "1 mile" : `${mi} mile`;
 }
 
-function normalizeStateAbbrev(s?: string | null) {
-  return (s ?? "").trim().toUpperCase();
-}
-
 /**
  * Demo category mapping.
  * In a real build we’ll map exact NERIS incident codes → controlled taxonomy.
@@ -202,20 +198,15 @@ function normalizeStateAbbrev(s?: string | null) {
  */
 function classifyIncident(i: ApiIncident): TypeFilterKey {
   const desc = (i.incident_type_description ?? "").toLowerCase();
-  const code = (i.neris_incident_type_code ?? i.incident_type_code ?? "")
-    .toString()
-    .toLowerCase();
-
+  const code = (i.neris_incident_type_code ?? i.incident_type_code ?? "").toString().toLowerCase();
   const t = `${desc} ${code}`.trim();
 
-  // description-based heuristics (demo-safe)
   if (t.includes("fire") || t.includes("smoke") || t.includes("burn")) return "fire";
   if (t.includes("ems") || t.includes("medical") || t.includes("injur") || t.includes("overdose")) return "ems";
   if (t.includes("haz") || t.includes("spill") || t.includes("leak")) return "hazmat";
   if (t.includes("service") || t.includes("assist") || t.includes("public")) return "service";
   if (t.includes("false") || t.includes("alarm") || t.includes("malfunction")) return "false_alarm";
 
-  // numeric-ish fallback (very coarse; demo-only)
   if (/^\d+/.test(code)) {
     const first = code.trim()[0];
     if (first === "1") return "fire";
@@ -266,59 +257,27 @@ function typeFilterColor(k: TypeFilterKey) {
 }
 
 // -----------------------------
-// Geo helpers (distance + bounding box)
+// Geocoding (HARDENED) — Nominatim / OSM + localStorage cache
 // -----------------------------
 
-function haversineMeters(a: GeoPoint, b: GeoPoint) {
-  const R = 6371000;
-  const toRad = (x: number) => (x * Math.PI) / 180;
-  const dLat = toRad(b.lat - a.lat);
-  const dLon = toRad(b.lon - a.lon);
-  const lat1 = toRad(a.lat);
-  const lat2 = toRad(b.lat); // ✅ bugfix: was a.lat
-  const sin1 = Math.sin(dLat / 2);
-  const sin2 = Math.sin(dLon / 2);
-  const h = sin1 * sin1 + Math.cos(lat1) * Math.cos(lat2) * sin2 * sin2;
-  return 2 * R * Math.asin(Math.sqrt(h));
+type GeocodeCtx = {
+  expectedCity?: string | null;
+  expectedState?: string | null;
+  // Optional bounding box around department center (preferred once deptCenter is known)
+  viewbox?: { left: number; top: number; right: number; bottom: number } | null;
+};
+
+function geocodeCacheKey(q: string, ctx?: GeocodeCtx) {
+  const city = (ctx?.expectedCity ?? "").trim().toLowerCase();
+  const state = (ctx?.expectedState ?? "").trim().toLowerCase();
+  const vb = ctx?.viewbox
+    ? `${ctx.viewbox.left.toFixed(2)},${ctx.viewbox.top.toFixed(2)},${ctx.viewbox.right.toFixed(2)},${ctx.viewbox.bottom.toFixed(2)}`
+    : "";
+  // include ctx so MA vs SD results can't be cached under the same key
+  return `geocode:v2:${q.toLowerCase()}|${city}|${state}|${vb}`;
 }
 
-function metersToDegreesLat(m: number) {
-  // ~111,320m per 1 degree latitude
-  return m / 111320;
-}
-
-function metersToDegreesLon(m: number, atLat: number) {
-  // ~111,320m * cos(lat) per 1 degree longitude
-  const denom = 111320 * Math.cos((atLat * Math.PI) / 180);
-  if (!Number.isFinite(denom) || denom === 0) return m / 111320;
-  return m / denom;
-}
-
-function viewboxFromCenter(center: GeoPoint, radiusMeters: number) {
-  const dLat = metersToDegreesLat(radiusMeters);
-  const dLon = metersToDegreesLon(radiusMeters, center.lat);
-  const left = center.lon - dLon;
-  const right = center.lon + dLon;
-  const top = center.lat + dLat;
-  const bottom = center.lat - dLat;
-  // Nominatim expects: left,top,right,bottom
-  return `${left},${top},${right},${bottom}`;
-}
-
-// -----------------------------
-// Geocoding (Nominatim / OSM) with localStorage cache
-// Hardened to avoid “Fall River, SD” type errors.
-// -----------------------------
-
-function geocodeCacheKey(q: string, ctx?: { city?: string; state?: string; bounded?: boolean; viewbox?: string }) {
-  const city = (ctx?.city ?? "").toLowerCase().trim();
-  const state = (ctx?.state ?? "").toLowerCase().trim();
-  const bounded = ctx?.bounded ? "1" : "0";
-  const vb = (ctx?.viewbox ?? "").toLowerCase().trim();
-  return `geocode:v2:${q.toLowerCase()}|${city}|${state}|${bounded}|${vb}`;
-}
-
-function readGeocodeCache(q: string, ctx?: { city?: string; state?: string; bounded?: boolean; viewbox?: string }): GeoPoint | null {
+function readGeocodeCache(q: string, ctx?: GeocodeCtx): GeoPoint | null {
   try {
     const raw = localStorage.getItem(geocodeCacheKey(q, ctx));
     if (!raw) return null;
@@ -330,7 +289,7 @@ function readGeocodeCache(q: string, ctx?: { city?: string; state?: string; boun
   }
 }
 
-function writeGeocodeCache(q: string, p: GeoPoint, ctx?: { city?: string; state?: string; bounded?: boolean; viewbox?: string }) {
+function writeGeocodeCache(q: string, p: GeoPoint, ctx?: GeocodeCtx) {
   try {
     localStorage.setItem(geocodeCacheKey(q, ctx), JSON.stringify(p));
   } catch {
@@ -338,196 +297,138 @@ function writeGeocodeCache(q: string, p: GeoPoint, ctx?: { city?: string; state?
   }
 }
 
-type NominatimResult = {
-  lat?: string;
-  lon?: string;
-  display_name?: string;
-  importance?: number;
-  class?: string;
-  type?: string;
-  address?: {
-    city?: string;
-    town?: string;
-    village?: string;
-    hamlet?: string;
-    suburb?: string;
-    county?: string;
-    state?: string;
-    state_code?: string;
-    postcode?: string;
-    country?: string;
-    country_code?: string;
+function normAlpha(s: unknown) {
+  return String(s ?? "")
+    .trim()
+    .toLowerCase();
+}
+
+// Very conservative state matching: accepts "MA" or "Massachusetts"
+function stateMatches(expectedState: string, addr: any) {
+  const exp = normAlpha(expectedState);
+  if (!exp) return true;
+
+  const stateCode = normAlpha(addr?.state_code);
+  const stateName = normAlpha(addr?.state);
+
+  // if expected is "MA" style
+  if (exp.length === 2) {
+    if (stateCode === exp) return true;
+    // sometimes OSM returns full state name; allow "ma" to match start of name? no—too risky.
+    return false;
+  }
+
+  // expected is full name
+  if (stateName === exp) return true;
+
+  return false;
+}
+
+function cityMatches(expectedCity: string, addr: any) {
+  const exp = normAlpha(expectedCity);
+  if (!exp) return true;
+
+  const city =
+    normAlpha(addr?.city) ||
+    normAlpha(addr?.town) ||
+    normAlpha(addr?.village) ||
+    normAlpha(addr?.hamlet) ||
+    normAlpha(addr?.municipality);
+
+  if (!city) return false;
+  return city === exp;
+}
+
+function buildDeptViewbox(center: GeoPoint, milesRadius: number) {
+  // crude but effective: degrees per mile adjustments
+  const lat = center.lat;
+  const lon = center.lon;
+
+  const latDelta = milesRadius / 69.0;
+  const lonDelta = milesRadius / (Math.cos((lat * Math.PI) / 180) * 69.0);
+
+  return {
+    left: lon - lonDelta,
+    right: lon + lonDelta,
+    top: lat + latDelta,
+    bottom: lat - latDelta,
   };
-};
-
-function pickStateFromResult(r: NominatimResult) {
-  const code = (r.address?.state_code ?? "").trim().toUpperCase();
-  if (code) return code;
-  // Sometimes state_code is missing; state may be full name (e.g., Massachusetts).
-  // For demo hardening we mainly rely on bounded viewbox + city/state string in query,
-  // but we still keep state string around.
-  return (r.address?.state ?? "").trim().toUpperCase();
 }
 
-function pickCityFromResult(r: NominatimResult) {
-  return (
-    r.address?.city ||
-    r.address?.town ||
-    r.address?.village ||
-    r.address?.hamlet ||
-    r.address?.suburb ||
-    ""
-  ).trim();
-}
-
-function scoreCandidate(opts: {
-  result: NominatimResult;
-  deptCenter?: GeoPoint | null;
-  deptCity?: string;
-  deptState?: string;
-}) {
-  const { result, deptCenter, deptCity, deptState } = opts;
-
-  const lat = result.lat ? Number(result.lat) : NaN;
-  const lon = result.lon ? Number(result.lon) : NaN;
-  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return -Infinity;
-
-  const imp = Number.isFinite(result.importance as number) ? (result.importance as number) : 0;
-
-  // Country must be US for our pilots (hardening)
-  const countryCode = (result.address?.country_code ?? "").toLowerCase();
-  if (countryCode && countryCode !== "us") return -Infinity;
-
-  let score = imp;
-
-  // Prefer results whose state matches (when state_code exists)
-  const resState = pickStateFromResult(result);
-  const wantState = normalizeStateAbbrev(deptState);
-  if (wantState && resState) {
-    if (resState === wantState) score += 2.5;
-    else score -= 3.5;
-  }
-
-  // Prefer matching city-ish field
-  const resCity = pickCityFromResult(result).toLowerCase();
-  const wantCity = (deptCity ?? "").trim().toLowerCase();
-  if (wantCity && resCity) {
-    if (resCity === wantCity) score += 1.5;
-    else score -= 0.75;
-  }
-
-  // Strong preference for proximity to department center (if known)
-  if (deptCenter) {
-    const d = haversineMeters(deptCenter, { lat, lon });
-    // within 5 miles: big boost; within 25 miles: medium; beyond: penalize
-    if (d <= milesToMeters(5)) score += 3.0;
-    else if (d <= milesToMeters(25)) score += 1.0;
-    else score -= Math.min(4, d / milesToMeters(50)); // gentle penalty
-  }
-
-  return score;
-}
-
-/**
- * Hardened geocode:
- * 1) If deptCenter is known, use a bounded viewbox around it (default 40 miles).
- * 2) Force countrycodes=us.
- * 3) Ask for addressdetails=1 and select best candidate by score.
- * 4) Cache results with context so we don’t mix states/cities accidentally.
- */
-async function geocodeAddress(
-  q: string,
-  opts?: {
-    signal?: AbortSignal;
-    deptCenter?: GeoPoint | null;
-    deptCity?: string | null;
-    deptState?: string | null;
-    boundMiles?: number; // default 40
-  }
-): Promise<GeoPoint | null> {
-  const query = (q ?? "").trim();
-  if (!query) return null;
-
-  const deptCity = (opts?.deptCity ?? "").trim();
-  const deptState = (opts?.deptState ?? "").trim();
-  const deptCenter = opts?.deptCenter ?? null;
-  const boundMiles = Number.isFinite(opts?.boundMiles as number) ? (opts?.boundMiles as number) : 40;
-
-  const ctx =
-    deptCenter
-      ? {
-          city: deptCity,
-          state: deptState,
-          bounded: true,
-          viewbox: viewboxFromCenter(deptCenter, milesToMeters(boundMiles)),
-        }
-      : {
-          city: deptCity,
-          state: deptState,
-          bounded: false,
-          viewbox: "",
-        };
-
-  const cached = typeof window !== "undefined" ? readGeocodeCache(query, ctx) : null;
+async function geocodeAddress(q: string, ctx?: GeocodeCtx, signal?: AbortSignal): Promise<GeoPoint | null> {
+  const cached = typeof window !== "undefined" ? readGeocodeCache(q, ctx) : null;
   if (cached) return cached;
 
-  // Build a query that always includes city/state/USA if we have them.
-  // This alone prevents “Oak Rd, SD” type fallbacks for common street names.
-  const qAug = (() => {
-    const pieces: string[] = [query];
-    if (deptCity && !query.toLowerCase().includes(deptCity.toLowerCase())) pieces.push(deptCity);
-    if (deptState && !query.toLowerCase().includes(deptState.toLowerCase())) pieces.push(deptState);
-    pieces.push("USA");
-    return pieces.join(", ");
-  })();
+  // 1) First attempt: bounded + US + validate city/state when provided
+  const tryFetch = async (query: string, attemptCtx?: GeocodeCtx) => {
+    const url = new URL("https://nominatim.openstreetmap.org/search");
+    url.searchParams.set("q", query);
+    url.searchParams.set("format", "json");
+    url.searchParams.set("limit", "5"); // fetch a few so we can validate and choose best
+    url.searchParams.set("addressdetails", "1");
+    url.searchParams.set("countrycodes", "us");
 
-  const url = new URL("https://nominatim.openstreetmap.org/search");
-  url.searchParams.set("format", "json");
-  url.searchParams.set("limit", "5");
-  url.searchParams.set("addressdetails", "1");
-  url.searchParams.set("countrycodes", "us");
-  url.searchParams.set("q", qAug);
+    // If we have a viewbox, bound to it.
+    if (attemptCtx?.viewbox) {
+      const vb = attemptCtx.viewbox;
+      url.searchParams.set("viewbox", `${vb.left},${vb.top},${vb.right},${vb.bottom}`);
+      url.searchParams.set("bounded", "1");
+    }
 
-  // If we have a center, constrain results to a local box.
-  if (deptCenter) {
-    url.searchParams.set("bounded", "1");
-    url.searchParams.set("viewbox", viewboxFromCenter(deptCenter, milesToMeters(boundMiles)));
+    const res = await fetch(url.toString(), {
+      method: "GET",
+      headers: { "Accept-Language": "en" },
+      signal,
+    });
+
+    if (!res.ok) return null;
+
+    const data = (await res.json().catch(() => null)) as any;
+    const arr = Array.isArray(data) ? data : [];
+
+    // Pick first candidate that matches state/city constraints (if provided).
+    const expectedState = (attemptCtx?.expectedState ?? "").trim();
+    const expectedCity = (attemptCtx?.expectedCity ?? "").trim();
+
+    const pick = arr.find((item: any) => {
+      const addr = item?.address;
+      const okState = expectedState ? stateMatches(expectedState, addr) : true;
+      const okCity = expectedCity ? cityMatches(expectedCity, addr) : true;
+      return okState && okCity;
+    });
+
+    const fallback = arr[0];
+
+    const chosen = pick ?? fallback;
+    if (!chosen) return null;
+
+    const lat = chosen?.lat ? Number(chosen.lat) : NaN;
+    const lon = chosen?.lon ? Number(chosen.lon) : NaN;
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+
+    return { lat, lon };
+  };
+
+  // Attempt 1: as-is query
+  const p1 = await tryFetch(q, ctx);
+  if (p1) {
+    writeGeocodeCache(q, p1, ctx);
+    return p1;
   }
 
-  const res = await fetch(url.toString(), {
-    method: "GET",
-    headers: { "Accept-Language": "en" },
-    signal: opts?.signal,
-  });
+  // Attempt 2: strengthen query with expected city/state if present
+  const city = (ctx?.expectedCity ?? "").trim();
+  const state = (ctx?.expectedState ?? "").trim();
+  const strengthened =
+    city || state ? `${q}${city ? `, ${city}` : ""}${state ? `, ${state}` : ""}, USA` : `${q}, USA`;
 
-  if (!res.ok) return null;
-
-  const data = (await res.json().catch(() => null)) as any;
-  const results: NominatimResult[] = Array.isArray(data) ? data : [];
-  if (results.length === 0) return null;
-
-  // Pick best candidate
-  let best: { r: NominatimResult; score: number } | null = null;
-  for (const r of results) {
-    const s = scoreCandidate({ result: r, deptCenter, deptCity, deptState });
-    if (!best || s > best.score) best = { r, score: s };
+  const p2 = await tryFetch(strengthened, ctx);
+  if (p2) {
+    writeGeocodeCache(q, p2, ctx); // cache under original key
+    return p2;
   }
 
-  const chosen = best?.r ?? results[0];
-  const lat = chosen?.lat ? Number(chosen.lat) : NaN;
-  const lon = chosen?.lon ? Number(chosen.lon) : NaN;
-  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
-
-  // Final safety check: if we have deptCenter, reject absurdly far results.
-  if (deptCenter) {
-    const d = haversineMeters(deptCenter, { lat, lon });
-    // 150 miles is “something is wrong” for a city-level pilot.
-    if (d > milesToMeters(150)) return null;
-  }
-
-  const p = { lat, lon };
-  writeGeocodeCache(query, p, ctx);
-  return p;
+  return null;
 }
 
 // -----------------------------
@@ -535,7 +436,6 @@ async function geocodeAddress(
 // -----------------------------
 
 function reverseCacheKey(lat: number, lon: number) {
-  // reduce precision so nearby points share cache
   const key = `${lat.toFixed(4)},${lon.toFixed(4)}`;
   return `revgeo:v1:${key}`;
 }
@@ -557,7 +457,6 @@ function writeReverseCache(lat: number, lon: number, label: string) {
 }
 
 function pickPlaceLabel(addr: any) {
-  // prefer neighborhood-ish signals, then road-ish, then city-ish
   const hood =
     addr?.neighbourhood ||
     addr?.suburb ||
@@ -615,6 +514,21 @@ async function reverseGeocodeLabel(p: GeoPoint, signal?: AbortSignal): Promise<s
 // Hotspot clustering
 // -----------------------------
 
+function haversineMeters(a: GeoPoint, b: GeoPoint) {
+  const R = 6371000;
+  const toRad = (x: number) => (x * Math.PI) / 180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLon = toRad(b.lon - a.lon);
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat); // ✅ bug fix (was a.lat)
+
+  const sin1 = Math.sin(dLat / 2);
+  const sin2 = Math.sin(dLon / 2);
+  const h = sin1 * sin1 + Math.cos(lat1) * Math.cos(lat2) * sin2 * sin2;
+
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
 function computeClusters(pins: IncidentPin[], thresholdMeters: number): HotspotCluster[] {
   const unused = pins.slice();
   const clusters: HotspotCluster[] = [];
@@ -646,7 +560,6 @@ function computeClusters(pins: IncidentPin[], thresholdMeters: number): HotspotC
     const computedRadius =
       group.reduce((mx, p) => Math.max(mx, haversineMeters(center, { lat: p.lat, lon: p.lon })), 0) + 80;
 
-    // Ensure visual circle stays meaningful at small counts and reflects chosen radius threshold
     const radius = Math.max(120, computedRadius, thresholdMeters);
 
     const counts = new Map<TypeFilterKey, number>();
@@ -819,7 +732,7 @@ function GrantNarrativePanel(props: GrantNarrativeInputs) {
 
     setDraft((prev) => {
       const marker = "Top Hotspots (Mapped Preview)";
-      if (prev.includes(marker)) return prev; // avoid duplicates in demo
+      if (prev.includes(marker)) return prev;
       return `${prev}\n\n${marker}\n${lines.join("\n")}`;
     });
   }
@@ -1336,7 +1249,6 @@ export default function DepartmentDetailPage() {
   const [mapMode, setMapMode] = useState<MapMode>("hotspots");
   const [typeFilter, setTypeFilter] = useState<TypeFilterKey>("all");
 
-  // Adjustable clustering radius (miles)
   const [hotspotRadiusMiles, setHotspotRadiusMiles] = useState<HotspotRadiusMiles>(0.5);
 
   const [deptCenter, setDeptCenter] = useState<GeoPoint | null>(null);
@@ -1347,7 +1259,6 @@ export default function DepartmentDetailPage() {
   const [selectedCluster, setSelectedCluster] = useState<HotspotCluster | null>(null);
   const [focusCenter, setFocusCenter] = useState<GeoPoint | null>(null);
 
-  // Hotspot reverse-geocode labels by cluster id
   const [hotspotLabels, setHotspotLabels] = useState<Record<string, string>>({});
 
   const [generatedAt, setGeneratedAt] = useState<string>(() => new Date().toISOString());
@@ -1437,7 +1348,6 @@ export default function DepartmentDetailPage() {
               department_id: Number(x.department_id),
               neris_incident_id: x.neris_incident_id ?? null,
 
-              // Back-compat + new fields
               incident_type_code: x.incident_type_code ?? null,
               neris_incident_type_code: x.neris_incident_type_code ?? null,
               incident_type_description: x.incident_type_description ?? null,
@@ -1481,7 +1391,7 @@ export default function DepartmentDetailPage() {
     });
   }, [incidents, timeRange, typeFilter]);
 
-  // Geocode dept first, then incidents (hardened)
+  // Geocode dept + incidents (HARDENED)
   useEffect(() => {
     let cancelled = false;
     const controller = new AbortController();
@@ -1493,21 +1403,30 @@ export default function DepartmentDetailPage() {
       setMapNote("Geocoding…");
 
       try {
-        // 1) Dept center (unbounded, but still US + city/state/USA in query)
+        // Dept center: use dept name + city/state (already in deptQuery)
         const qDept = deptQuery(dept);
-        const deptP = qDept
-          ? await geocodeAddress(qDept, {
-              signal: controller.signal,
-              deptCenter: null,
-              deptCity: dept.city ?? null,
-              deptState: dept.state ?? null,
-              boundMiles: 0, // ignored if no center
-            })
-          : null;
 
+        // Dept geocode context: we want the dept itself to resolve to its city/state when possible
+        const deptCtx: GeocodeCtx = {
+          expectedCity: dept.city ?? null,
+          expectedState: dept.state ?? null,
+          viewbox: null,
+        };
+
+        const deptP = qDept ? await geocodeAddress(qDept, deptCtx, controller.signal) : null;
         if (!cancelled) setDeptCenter(deptP);
 
-        // 2) Incident pins (bounded to dept center if available)
+        // If we have a dept center, define a viewbox to constrain incident lookups.
+        // 12 miles is a demo-safe boundary: prevents “other state” errors while allowing mutual aid-ish edges.
+        const viewbox = deptP ? buildDeptViewbox(deptP, 12) : null;
+
+        const incidentCtxBase: GeocodeCtx = {
+          expectedCity: dept.city ?? null,
+          expectedState: dept.state ?? null,
+          viewbox,
+        };
+
+        // Incident pins (limit for rate-limits)
         const toGeocode = filteredIncidents.slice(0, 40);
 
         const builtPins: IncidentPin[] = [];
@@ -1517,14 +1436,8 @@ export default function DepartmentDetailPage() {
           const q = incidentAddressLine(inc);
           if (!q) continue;
 
-          const p = await geocodeAddress(q, {
-            signal: controller.signal,
-            deptCenter: deptP ?? null,
-            deptCity: dept.city ?? inc.city ?? null,
-            deptState: dept.state ?? inc.state ?? null,
-            boundMiles: 40,
-          });
-
+          // Use dept constraints to prevent SD-style failures
+          const p = await geocodeAddress(q, incidentCtxBase, controller.signal);
           if (!p) continue;
 
           const category = typeFilter === "all" ? classifyIncident(inc) : typeFilter;
@@ -1781,7 +1694,6 @@ export default function DepartmentDetailPage() {
 
         {!loading && dept ? (
           <>
-            {/* AI Assist — Grant Narrative Draft */}
             <GrantNarrativePanel
               departmentName={dept.name}
               city={dept.city ?? ""}
@@ -1825,7 +1737,6 @@ export default function DepartmentDetailPage() {
                 </div>
               </div>
 
-              {/* Filters UI */}
               <div className="mt-3 rounded-md border border-slate-800 bg-slate-950/20 p-3">
                 <div className="grid gap-3 md:grid-cols-3">
                   <div>
@@ -1877,7 +1788,7 @@ export default function DepartmentDetailPage() {
                 </div>
               </div>
 
-              <div className="mt-3 overflow-hidden rounded-md border border-slate-800 bg-slate-950/30" id="hotspot-map-anchor">
+              <div className="mt-3 overflow-hidden rounded-md border border-slate-800 bg-slate-950/30">
                 <HotspotLeafletMap
                   center={deptCenter}
                   focusCenter={focusCenter}
@@ -1938,9 +1849,7 @@ export default function DepartmentDetailPage() {
                               </div>
                             </div>
 
-                            <div className="mt-1 text-[11px] text-slate-400">
-                              Dominant: {typeFilterLabel(c.dominantCategory)}
-                            </div>
+                            <div className="mt-1 text-[11px] text-slate-400">Dominant: {typeFilterLabel(c.dominantCategory)}</div>
 
                             <div className="mt-1 text-[11px] text-slate-500">
                               {place ? (
