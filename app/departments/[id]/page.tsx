@@ -188,6 +188,10 @@ function radiusLabel(mi: HotspotRadiusMiles) {
   return mi === 1.0 ? "1 mile" : `${mi} mile`;
 }
 
+function normalizeStateAbbrev(s?: string | null) {
+  return (s ?? "").trim().toUpperCase();
+}
+
 /**
  * Demo category mapping.
  * In a real build we’ll map exact NERIS incident codes → controlled taxonomy.
@@ -198,8 +202,9 @@ function radiusLabel(mi: HotspotRadiusMiles) {
  */
 function classifyIncident(i: ApiIncident): TypeFilterKey {
   const desc = (i.incident_type_description ?? "").toLowerCase();
-  const code =
-    (i.neris_incident_type_code ?? i.incident_type_code ?? "").toString().toLowerCase();
+  const code = (i.neris_incident_type_code ?? i.incident_type_code ?? "")
+    .toString()
+    .toLowerCase();
 
   const t = `${desc} ${code}`.trim();
 
@@ -211,7 +216,6 @@ function classifyIncident(i: ApiIncident): TypeFilterKey {
   if (t.includes("false") || t.includes("alarm") || t.includes("malfunction")) return "false_alarm";
 
   // numeric-ish fallback (very coarse; demo-only)
-  // Many coding schemes group fires into lower codes; we keep this conservative.
   if (/^\d+/.test(code)) {
     const first = code.trim()[0];
     if (first === "1") return "fire";
@@ -262,16 +266,61 @@ function typeFilterColor(k: TypeFilterKey) {
 }
 
 // -----------------------------
-// Geocoding (Nominatim / OSM) with localStorage cache
+// Geo helpers (distance + bounding box)
 // -----------------------------
 
-function geocodeCacheKey(q: string) {
-  return `geocode:v1:${q.toLowerCase()}`;
+function haversineMeters(a: GeoPoint, b: GeoPoint) {
+  const R = 6371000;
+  const toRad = (x: number) => (x * Math.PI) / 180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLon = toRad(b.lon - a.lon);
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat); // ✅ bugfix: was a.lat
+  const sin1 = Math.sin(dLat / 2);
+  const sin2 = Math.sin(dLon / 2);
+  const h = sin1 * sin1 + Math.cos(lat1) * Math.cos(lat2) * sin2 * sin2;
+  return 2 * R * Math.asin(Math.sqrt(h));
 }
 
-function readGeocodeCache(q: string): GeoPoint | null {
+function metersToDegreesLat(m: number) {
+  // ~111,320m per 1 degree latitude
+  return m / 111320;
+}
+
+function metersToDegreesLon(m: number, atLat: number) {
+  // ~111,320m * cos(lat) per 1 degree longitude
+  const denom = 111320 * Math.cos((atLat * Math.PI) / 180);
+  if (!Number.isFinite(denom) || denom === 0) return m / 111320;
+  return m / denom;
+}
+
+function viewboxFromCenter(center: GeoPoint, radiusMeters: number) {
+  const dLat = metersToDegreesLat(radiusMeters);
+  const dLon = metersToDegreesLon(radiusMeters, center.lat);
+  const left = center.lon - dLon;
+  const right = center.lon + dLon;
+  const top = center.lat + dLat;
+  const bottom = center.lat - dLat;
+  // Nominatim expects: left,top,right,bottom
+  return `${left},${top},${right},${bottom}`;
+}
+
+// -----------------------------
+// Geocoding (Nominatim / OSM) with localStorage cache
+// Hardened to avoid “Fall River, SD” type errors.
+// -----------------------------
+
+function geocodeCacheKey(q: string, ctx?: { city?: string; state?: string; bounded?: boolean; viewbox?: string }) {
+  const city = (ctx?.city ?? "").toLowerCase().trim();
+  const state = (ctx?.state ?? "").toLowerCase().trim();
+  const bounded = ctx?.bounded ? "1" : "0";
+  const vb = (ctx?.viewbox ?? "").toLowerCase().trim();
+  return `geocode:v2:${q.toLowerCase()}|${city}|${state}|${bounded}|${vb}`;
+}
+
+function readGeocodeCache(q: string, ctx?: { city?: string; state?: string; bounded?: boolean; viewbox?: string }): GeoPoint | null {
   try {
-    const raw = localStorage.getItem(geocodeCacheKey(q));
+    const raw = localStorage.getItem(geocodeCacheKey(q, ctx));
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed.lat !== "number" || typeof parsed.lon !== "number") return null;
@@ -281,41 +330,203 @@ function readGeocodeCache(q: string): GeoPoint | null {
   }
 }
 
-function writeGeocodeCache(q: string, p: GeoPoint) {
+function writeGeocodeCache(q: string, p: GeoPoint, ctx?: { city?: string; state?: string; bounded?: boolean; viewbox?: string }) {
   try {
-    localStorage.setItem(geocodeCacheKey(q), JSON.stringify(p));
+    localStorage.setItem(geocodeCacheKey(q, ctx), JSON.stringify(p));
   } catch {
     // ignore
   }
 }
 
-async function geocodeAddress(q: string, signal?: AbortSignal): Promise<GeoPoint | null> {
-  const cached = typeof window !== "undefined" ? readGeocodeCache(q) : null;
+type NominatimResult = {
+  lat?: string;
+  lon?: string;
+  display_name?: string;
+  importance?: number;
+  class?: string;
+  type?: string;
+  address?: {
+    city?: string;
+    town?: string;
+    village?: string;
+    hamlet?: string;
+    suburb?: string;
+    county?: string;
+    state?: string;
+    state_code?: string;
+    postcode?: string;
+    country?: string;
+    country_code?: string;
+  };
+};
+
+function pickStateFromResult(r: NominatimResult) {
+  const code = (r.address?.state_code ?? "").trim().toUpperCase();
+  if (code) return code;
+  // Sometimes state_code is missing; state may be full name (e.g., Massachusetts).
+  // For demo hardening we mainly rely on bounded viewbox + city/state string in query,
+  // but we still keep state string around.
+  return (r.address?.state ?? "").trim().toUpperCase();
+}
+
+function pickCityFromResult(r: NominatimResult) {
+  return (
+    r.address?.city ||
+    r.address?.town ||
+    r.address?.village ||
+    r.address?.hamlet ||
+    r.address?.suburb ||
+    ""
+  ).trim();
+}
+
+function scoreCandidate(opts: {
+  result: NominatimResult;
+  deptCenter?: GeoPoint | null;
+  deptCity?: string;
+  deptState?: string;
+}) {
+  const { result, deptCenter, deptCity, deptState } = opts;
+
+  const lat = result.lat ? Number(result.lat) : NaN;
+  const lon = result.lon ? Number(result.lon) : NaN;
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return -Infinity;
+
+  const imp = Number.isFinite(result.importance as number) ? (result.importance as number) : 0;
+
+  // Country must be US for our pilots (hardening)
+  const countryCode = (result.address?.country_code ?? "").toLowerCase();
+  if (countryCode && countryCode !== "us") return -Infinity;
+
+  let score = imp;
+
+  // Prefer results whose state matches (when state_code exists)
+  const resState = pickStateFromResult(result);
+  const wantState = normalizeStateAbbrev(deptState);
+  if (wantState && resState) {
+    if (resState === wantState) score += 2.5;
+    else score -= 3.5;
+  }
+
+  // Prefer matching city-ish field
+  const resCity = pickCityFromResult(result).toLowerCase();
+  const wantCity = (deptCity ?? "").trim().toLowerCase();
+  if (wantCity && resCity) {
+    if (resCity === wantCity) score += 1.5;
+    else score -= 0.75;
+  }
+
+  // Strong preference for proximity to department center (if known)
+  if (deptCenter) {
+    const d = haversineMeters(deptCenter, { lat, lon });
+    // within 5 miles: big boost; within 25 miles: medium; beyond: penalize
+    if (d <= milesToMeters(5)) score += 3.0;
+    else if (d <= milesToMeters(25)) score += 1.0;
+    else score -= Math.min(4, d / milesToMeters(50)); // gentle penalty
+  }
+
+  return score;
+}
+
+/**
+ * Hardened geocode:
+ * 1) If deptCenter is known, use a bounded viewbox around it (default 40 miles).
+ * 2) Force countrycodes=us.
+ * 3) Ask for addressdetails=1 and select best candidate by score.
+ * 4) Cache results with context so we don’t mix states/cities accidentally.
+ */
+async function geocodeAddress(
+  q: string,
+  opts?: {
+    signal?: AbortSignal;
+    deptCenter?: GeoPoint | null;
+    deptCity?: string | null;
+    deptState?: string | null;
+    boundMiles?: number; // default 40
+  }
+): Promise<GeoPoint | null> {
+  const query = (q ?? "").trim();
+  if (!query) return null;
+
+  const deptCity = (opts?.deptCity ?? "").trim();
+  const deptState = (opts?.deptState ?? "").trim();
+  const deptCenter = opts?.deptCenter ?? null;
+  const boundMiles = Number.isFinite(opts?.boundMiles as number) ? (opts?.boundMiles as number) : 40;
+
+  const ctx =
+    deptCenter
+      ? {
+          city: deptCity,
+          state: deptState,
+          bounded: true,
+          viewbox: viewboxFromCenter(deptCenter, milesToMeters(boundMiles)),
+        }
+      : {
+          city: deptCity,
+          state: deptState,
+          bounded: false,
+          viewbox: "",
+        };
+
+  const cached = typeof window !== "undefined" ? readGeocodeCache(query, ctx) : null;
   if (cached) return cached;
 
+  // Build a query that always includes city/state/USA if we have them.
+  // This alone prevents “Oak Rd, SD” type fallbacks for common street names.
+  const qAug = (() => {
+    const pieces: string[] = [query];
+    if (deptCity && !query.toLowerCase().includes(deptCity.toLowerCase())) pieces.push(deptCity);
+    if (deptState && !query.toLowerCase().includes(deptState.toLowerCase())) pieces.push(deptState);
+    pieces.push("USA");
+    return pieces.join(", ");
+  })();
+
   const url = new URL("https://nominatim.openstreetmap.org/search");
-  url.searchParams.set("q", q);
   url.searchParams.set("format", "json");
-  url.searchParams.set("limit", "1");
+  url.searchParams.set("limit", "5");
+  url.searchParams.set("addressdetails", "1");
+  url.searchParams.set("countrycodes", "us");
+  url.searchParams.set("q", qAug);
+
+  // If we have a center, constrain results to a local box.
+  if (deptCenter) {
+    url.searchParams.set("bounded", "1");
+    url.searchParams.set("viewbox", viewboxFromCenter(deptCenter, milesToMeters(boundMiles)));
+  }
 
   const res = await fetch(url.toString(), {
     method: "GET",
     headers: { "Accept-Language": "en" },
-    signal,
+    signal: opts?.signal,
   });
 
   if (!res.ok) return null;
 
   const data = (await res.json().catch(() => null)) as any;
-  const first = Array.isArray(data) ? data[0] : null;
+  const results: NominatimResult[] = Array.isArray(data) ? data : [];
+  if (results.length === 0) return null;
 
-  const lat = first?.lat ? Number(first.lat) : NaN;
-  const lon = first?.lon ? Number(first.lon) : NaN;
+  // Pick best candidate
+  let best: { r: NominatimResult; score: number } | null = null;
+  for (const r of results) {
+    const s = scoreCandidate({ result: r, deptCenter, deptCity, deptState });
+    if (!best || s > best.score) best = { r, score: s };
+  }
 
+  const chosen = best?.r ?? results[0];
+  const lat = chosen?.lat ? Number(chosen.lat) : NaN;
+  const lon = chosen?.lon ? Number(chosen.lon) : NaN;
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
 
+  // Final safety check: if we have deptCenter, reject absurdly far results.
+  if (deptCenter) {
+    const d = haversineMeters(deptCenter, { lat, lon });
+    // 150 miles is “something is wrong” for a city-level pilot.
+    if (d > milesToMeters(150)) return null;
+  }
+
   const p = { lat, lon };
-  writeGeocodeCache(q, p);
+  writeGeocodeCache(query, p, ctx);
   return p;
 }
 
@@ -358,10 +569,8 @@ function pickPlaceLabel(addr: any) {
     addr?.county;
 
   const road = addr?.road || addr?.pedestrian || addr?.residential || addr?.path;
-  const place =
-    addr?.city || addr?.town || addr?.village || addr?.hamlet || addr?.county || addr?.state;
+  const place = addr?.city || addr?.town || addr?.village || addr?.hamlet || addr?.county || addr?.state;
 
-  // If we have both hood and road and they differ, we can do "Hood — Road"
   if (hood && road && String(hood) !== String(road)) return `${hood} — ${road}`;
   if (hood) return String(hood);
   if (road && place) return `${road}, ${place}`;
@@ -406,21 +615,6 @@ async function reverseGeocodeLabel(p: GeoPoint, signal?: AbortSignal): Promise<s
 // Hotspot clustering
 // -----------------------------
 
-function haversineMeters(a: GeoPoint, b: GeoPoint) {
-  const R = 6371000;
-  const toRad = (x: number) => (x * Math.PI) / 180;
-  const dLat = toRad(b.lat - a.lat);
-  const dLon = toRad(b.lon - a.lon);
-  const lat1 = toRad(a.lat);
-  const lat2 = toRad(a.lat);
-
-  const sin1 = Math.sin(dLat / 2);
-  const sin2 = Math.sin(dLon / 2);
-  const h = sin1 * sin1 + Math.cos(lat1) * Math.cos(lat2) * sin2 * sin2;
-
-  return 2 * R * Math.asin(Math.sqrt(h));
-}
-
 function computeClusters(pins: IncidentPin[], thresholdMeters: number): HotspotCluster[] {
   const unused = pins.slice();
   const clusters: HotspotCluster[] = [];
@@ -435,9 +629,7 @@ function computeClusters(pins: IncidentPin[], thresholdMeters: number): HotspotC
       for (let i = unused.length - 1; i >= 0; i--) {
         const p = unused[i];
         const closeToAny = group.some(
-          (g) =>
-            haversineMeters({ lat: g.lat, lon: g.lon }, { lat: p.lat, lon: p.lon }) <=
-            thresholdMeters
+          (g) => haversineMeters({ lat: g.lat, lon: g.lon }, { lat: p.lat, lon: p.lon }) <= thresholdMeters
         );
         if (closeToAny) {
           group.push(p);
@@ -1144,7 +1336,7 @@ export default function DepartmentDetailPage() {
   const [mapMode, setMapMode] = useState<MapMode>("hotspots");
   const [typeFilter, setTypeFilter] = useState<TypeFilterKey>("all");
 
-  // NEW: adjustable clustering radius (miles)
+  // Adjustable clustering radius (miles)
   const [hotspotRadiusMiles, setHotspotRadiusMiles] = useState<HotspotRadiusMiles>(0.5);
 
   const [deptCenter, setDeptCenter] = useState<GeoPoint | null>(null);
@@ -1155,7 +1347,7 @@ export default function DepartmentDetailPage() {
   const [selectedCluster, setSelectedCluster] = useState<HotspotCluster | null>(null);
   const [focusCenter, setFocusCenter] = useState<GeoPoint | null>(null);
 
-  // NEW: hotspot reverse-geocode labels by cluster id
+  // Hotspot reverse-geocode labels by cluster id
   const [hotspotLabels, setHotspotLabels] = useState<Record<string, string>>({});
 
   const [generatedAt, setGeneratedAt] = useState<string>(() => new Date().toISOString());
@@ -1289,7 +1481,7 @@ export default function DepartmentDetailPage() {
     });
   }, [incidents, timeRange, typeFilter]);
 
-  // Geocode dept + incidents (demo-safe)
+  // Geocode dept first, then incidents (hardened)
   useEffect(() => {
     let cancelled = false;
     const controller = new AbortController();
@@ -1301,12 +1493,21 @@ export default function DepartmentDetailPage() {
       setMapNote("Geocoding…");
 
       try {
-        // Dept center
+        // 1) Dept center (unbounded, but still US + city/state/USA in query)
         const qDept = deptQuery(dept);
-        const deptP = qDept ? await geocodeAddress(qDept, controller.signal) : null;
+        const deptP = qDept
+          ? await geocodeAddress(qDept, {
+              signal: controller.signal,
+              deptCenter: null,
+              deptCity: dept.city ?? null,
+              deptState: dept.state ?? null,
+              boundMiles: 0, // ignored if no center
+            })
+          : null;
+
         if (!cancelled) setDeptCenter(deptP);
 
-        // Incident pins (limit for rate-limits)
+        // 2) Incident pins (bounded to dept center if available)
         const toGeocode = filteredIncidents.slice(0, 40);
 
         const builtPins: IncidentPin[] = [];
@@ -1316,7 +1517,14 @@ export default function DepartmentDetailPage() {
           const q = incidentAddressLine(inc);
           if (!q) continue;
 
-          const p = await geocodeAddress(q, controller.signal);
+          const p = await geocodeAddress(q, {
+            signal: controller.signal,
+            deptCenter: deptP ?? null,
+            deptCity: dept.city ?? inc.city ?? null,
+            deptState: dept.state ?? inc.state ?? null,
+            boundMiles: 40,
+          });
+
           if (!p) continue;
 
           const category = typeFilter === "all" ? classifyIncident(inc) : typeFilter;
@@ -1484,12 +1692,6 @@ export default function DepartmentDetailPage() {
           .print-subtitle { font-size: 12px; color: #334155; margin-top: 2px; }
           .print-meta { font-size: 11px; color: #475569; margin-top: 8px; }
 
-          .print-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
-          .print-card { border: 1px solid #e2e8f0; border-radius: 10px; padding: 10px; }
-          .print-card h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: #64748b; margin: 0 0 6px 0; }
-          .print-value { font-size: 18px; font-weight: 800; color: #0f172a; }
-          .print-note { font-size: 11px; color: #334155; margin-top: 10px; }
-
           .print-footer { margin-top: 18px; padding-top: 10px; border-top: 1px solid #e2e8f0; font-size: 10px; color: #475569; }
         }
       `}</style>
@@ -1623,7 +1825,7 @@ export default function DepartmentDetailPage() {
                 </div>
               </div>
 
-              {/* ✅ Filters UI (restored) */}
+              {/* Filters UI */}
               <div className="mt-3 rounded-md border border-slate-800 bg-slate-950/20 p-3">
                 <div className="grid gap-3 md:grid-cols-3">
                   <div>
@@ -1675,7 +1877,7 @@ export default function DepartmentDetailPage() {
                 </div>
               </div>
 
-              <div className="mt-3 overflow-hidden rounded-md border border-slate-800 bg-slate-950/30">
+              <div className="mt-3 overflow-hidden rounded-md border border-slate-800 bg-slate-950/30" id="hotspot-map-anchor">
                 <HotspotLeafletMap
                   center={deptCenter}
                   focusCenter={focusCenter}
@@ -1707,9 +1909,7 @@ export default function DepartmentDetailPage() {
 
                   <div className="mt-3 grid gap-2 md:grid-cols-3">
                     {topHotspots.length === 0 ? (
-                      <div className="text-xs text-slate-400">
-                        No hotspots available yet (need at least 2 mapped pins nearby).
-                      </div>
+                      <div className="text-xs text-slate-400">No hotspots available yet (need at least 2 mapped pins nearby).</div>
                     ) : (
                       topHotspots.map((c) => {
                         const color = typeFilterColor(c.dominantCategory);
