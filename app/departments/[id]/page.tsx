@@ -188,31 +188,6 @@ function radiusLabel(mi: HotspotRadiusMiles) {
   return mi === 1.0 ? "1 mile" : `${mi} mile`;
 }
 
-function sanitizeCsvCell(v: unknown) {
-  const s = String(v ?? "");
-  // basic CSV escaping + formula injection hardening
-  const trimmed = s.trim();
-  const needsGuard = /^[=+\-@]/.test(trimmed);
-  const guarded = needsGuard ? `'${trimmed}` : trimmed;
-  return `"${guarded.replace(/"/g, '""')}"`;
-}
-
-function downloadTextFile(filename: string, content: string, mime = "text/plain;charset=utf-8") {
-  try {
-    const blob = new Blob([content], { type: mime });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-  } catch {
-    // ignore (demo-safe)
-  }
-}
-
 /**
  * Demo category mapping.
  * In a real build we’ll map exact NERIS incident codes → controlled taxonomy.
@@ -288,6 +263,7 @@ function typeFilterColor(k: TypeFilterKey) {
 type GeocodeCtx = {
   expectedCity?: string | null;
   expectedState?: string | null;
+  // Optional bounding box around department center (preferred once deptCenter is known)
   viewbox?: { left: number; top: number; right: number; bottom: number } | null;
 };
 
@@ -297,6 +273,7 @@ function geocodeCacheKey(q: string, ctx?: GeocodeCtx) {
   const vb = ctx?.viewbox
     ? `${ctx.viewbox.left.toFixed(2)},${ctx.viewbox.top.toFixed(2)},${ctx.viewbox.right.toFixed(2)},${ctx.viewbox.bottom.toFixed(2)}`
     : "";
+  // include ctx so MA vs SD results can't be cached under the same key
   return `geocode:v2:${q.toLowerCase()}|${city}|${state}|${vb}`;
 }
 
@@ -326,6 +303,7 @@ function normAlpha(s: unknown) {
     .toLowerCase();
 }
 
+// Very conservative state matching: accepts "MA" or "Massachusetts"
 function stateMatches(expectedState: string, addr: any) {
   const exp = normAlpha(expectedState);
   if (!exp) return true;
@@ -411,7 +389,9 @@ async function geocodeAddress(q: string, ctx?: GeocodeCtx, signal?: AbortSignal)
       return okState && okCity;
     });
 
-    const chosen = pick ?? arr[0];
+    const fallback = arr[0];
+
+    const chosen = pick ?? fallback;
     if (!chosen) return null;
 
     const lat = chosen?.lat ? Number(chosen.lat) : NaN;
@@ -1240,6 +1220,34 @@ function HotspotRadiusSelect({
 }
 
 // -----------------------------
+// Export helpers (print + CSV)
+// -----------------------------
+
+function downloadTextFile(filename: string, content: string, mime = "text/plain;charset=utf-8") {
+  try {
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch {
+    // ignore
+  }
+}
+
+function csvEscape(v: unknown) {
+  const s = String(v ?? "");
+  if (s.includes('"') || s.includes(",") || s.includes("\n") || s.includes("\r")) {
+    return `"${s.replace(/"/g, '""')}"`;
+  }
+  return s;
+}
+
+// -----------------------------
 // Page
 // -----------------------------
 
@@ -1294,6 +1302,14 @@ export default function DepartmentDetailPage() {
   }
 
   function exportPinsCsv() {
+    const now = new Date();
+    const stamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(
+      2,
+      "0"
+    )}`;
+    const deptNameSafe = (dept?.name ?? "department").replace(/[^a-z0-9]+/gi, "_").replace(/^_+|_+$/g, "");
+    const filename = `infernointelai_${deptNameSafe}_pins_${stamp}.csv`;
+
     const header = [
       "department_id",
       "department_name",
@@ -1303,72 +1319,34 @@ export default function DepartmentDetailPage() {
       "incident_id",
       "occurred_at",
       "category",
-      "address_line",
+      "address",
       "lat",
       "lon",
     ];
 
-    const rows = pins.map((p) => [
-      deptId,
-      dept?.name ?? "",
-      timeRangeLabel(timeRange),
-      typeFilterLabel(typeFilter),
-      hotspotRadiusMiles,
-      p.incidentId,
-      p.occurredAt ?? "",
-      typeFilterLabel(p.dominantCategory),
-      p.addressLine,
-      p.lat,
-      p.lon,
-    ]);
+    const lines = [header.join(",")];
 
-    const csv = [header.map(sanitizeCsvCell).join(","), ...rows.map((r) => r.map(sanitizeCsvCell).join(","))].join("\n");
-    downloadTextFile(
-      `infernointelai_${deptId}_pins_${new Date().toISOString().slice(0, 10)}.csv`,
-      csv,
-      "text/csv;charset=utf-8"
-    );
-  }
+    for (const p of pins) {
+      lines.push(
+        [
+          dept?.id ?? "",
+          dept?.name ?? "",
+          timeRangeLabel(timeRange),
+          typeFilterLabel(typeFilter),
+          String(hotspotRadiusMiles),
+          p.incidentId,
+          p.occurredAt ?? "",
+          typeFilterLabel(p.dominantCategory),
+          p.addressLine,
+          p.lat,
+          p.lon,
+        ]
+          .map(csvEscape)
+          .join(",")
+      );
+    }
 
-  function exportHotspotsCsv() {
-    const header = [
-      "department_id",
-      "department_name",
-      "time_window",
-      "category_filter",
-      "hotspot_radius_miles",
-      "cluster_id",
-      "count",
-      "dominant_category",
-      "place_label",
-      "center_lat",
-      "center_lon",
-      "radius_meters",
-      "incident_ids",
-    ];
-
-    const rows = clusters.map((c) => [
-      deptId,
-      dept?.name ?? "",
-      timeRangeLabel(timeRange),
-      typeFilterLabel(typeFilter),
-      hotspotRadiusMiles,
-      c.id,
-      c.count,
-      typeFilterLabel(c.dominantCategory),
-      hotspotLabels[c.id] ?? "",
-      c.center.lat,
-      c.center.lon,
-      Math.round(c.radiusMeters),
-      c.pins.map((p) => p.incidentId).join("|"),
-    ]);
-
-    const csv = [header.map(sanitizeCsvCell).join(","), ...rows.map((r) => r.map(sanitizeCsvCell).join(","))].join("\n");
-    downloadTextFile(
-      `infernointelai_${deptId}_hotspots_${new Date().toISOString().slice(0, 10)}.csv`,
-      csv,
-      "text/csv;charset=utf-8"
-    );
+    downloadTextFile(filename, lines.join("\n"), "text/csv;charset=utf-8");
   }
 
   // Load dept + incidents
@@ -1660,8 +1638,18 @@ export default function DepartmentDetailPage() {
     }));
   }, [topHotspots, hotspotLabels]);
 
-  // Print table rows: show up to 25 pins, newest first
-  const pinsForPrint = useMemo(() => {
+  // NEW: print-friendly lists
+  const printTopHotspots = useMemo(() => {
+    return topHotspots.map((c) => ({
+      id: c.id,
+      count: c.count,
+      dominant: typeFilterLabel(c.dominantCategory),
+      radiusMeters: Math.round(c.radiusMeters),
+      place: hotspotLabels[c.id] ?? "",
+    }));
+  }, [topHotspots, hotspotLabels]);
+
+  const recentPinsForPrint = useMemo(() => {
     return pins
       .slice()
       .sort((a, b) => {
@@ -1669,7 +1657,7 @@ export default function DepartmentDetailPage() {
         const tb = new Date(b.occurredAt ?? 0).getTime();
         return tb - ta;
       })
-      .slice(0, 25);
+      .slice(0, 12);
   }, [pins]);
 
   return (
@@ -1688,29 +1676,42 @@ export default function DepartmentDetailPage() {
             print-color-adjust: exact;
           }
 
+          .print-avoid-break { break-inside: avoid; page-break-inside: avoid; }
+
           .print-page {
             padding: 24px;
             font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
           }
 
-          .print-title { font-size: 18px; font-weight: 900; }
+          .print-title { font-size: 18px; font-weight: 900; letter-spacing: -0.01em; }
           .print-subtitle { font-size: 12px; color: #334155; margin-top: 2px; }
-          .print-meta { font-size: 11px; color: #475569; margin-top: 8px; }
+          .print-meta { font-size: 11px; color: #475569; margin-top: 8px; line-height: 1.35; }
 
-          .print-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
-          .print-card { border: 1px solid #e2e8f0; border-radius: 10px; padding: 10px; break-inside: avoid; page-break-inside: avoid; }
-          .print-card h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: #64748b; margin: 0 0 6px 0; }
-          .print-value { font-size: 18px; font-weight: 900; color: #0f172a; }
-          .print-small { font-size: 11px; color: #334155; margin-top: 6px; }
-          .print-note { margin-top: 12px; font-size: 11px; color: #334155; }
-          .print-hr { height: 1px; background: #e2e8f0; margin: 14px 0; }
+          .print-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
+          .print-card { border: 1px solid #e2e8f0; border-radius: 10px; padding: 10px; }
+          .print-card h3 { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: #64748b; margin: 0 0 6px 0; }
+          .print-value { font-size: 18px; font-weight: 900; color: #0f172a; line-height: 1; }
+          .print-small { font-size: 10px; color: #64748b; margin-top: 6px; }
 
-          .print-table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-          .print-table th { text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: #64748b; border-bottom: 1px solid #e2e8f0; padding: 8px 6px; }
-          .print-table td { font-size: 11px; color: #0f172a; border-bottom: 1px solid #f1f5f9; padding: 8px 6px; vertical-align: top; }
-          .print-badge { display: inline-block; border: 1px solid #cbd5e1; border-radius: 999px; padding: 2px 8px; font-size: 10px; font-weight: 700; color: #0f172a; }
+          .print-section { margin-top: 14px; }
+          .print-section-title { font-size: 11px; font-weight: 800; color: #0f172a; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.06em; }
 
-          .print-footer { margin-top: 18px; padding-top: 10px; border-top: 1px solid #e2e8f0; font-size: 10px; color: #475569; }
+          .print-table { width: 100%; border-collapse: collapse; }
+          .print-table th, .print-table td { border: 1px solid #e2e8f0; padding: 6px 8px; font-size: 10px; vertical-align: top; }
+          .print-table th { background: #f8fafc; color: #334155; font-weight: 800; text-transform: uppercase; letter-spacing: 0.06em; }
+
+          .print-disclaimer {
+            margin-top: 14px;
+            padding: 10px;
+            border: 1px solid #fde68a;
+            background: #fffbeb;
+            border-radius: 10px;
+            font-size: 10px;
+            color: #7c2d12;
+            line-height: 1.35;
+          }
+
+          .print-footer { margin-top: 16px; padding-top: 10px; border-top: 1px solid #e2e8f0; font-size: 9px; color: #475569; line-height: 1.35; }
         }
       `}</style>
 
@@ -1721,8 +1722,8 @@ export default function DepartmentDetailPage() {
         </div>
 
         <div className="print-meta">
-          Generated: <strong>{generated.local}</strong> • Filters: <strong>{activeFiltersText}</strong> • Radius:{" "}
-          <strong>{radiusLabel(hotspotRadiusMiles)}</strong>
+          Generated: <strong>{generated.local}</strong> • Window: <strong>{timeRangeLabel(timeRange)}</strong> • Category:{" "}
+          <strong>{typeFilterLabel(typeFilter)}</strong> • Hotspot radius: <strong>{radiusLabel(hotspotRadiusMiles)}</strong>
           {dept?.neris_department_id ? (
             <>
               {" "}
@@ -1735,50 +1736,48 @@ export default function DepartmentDetailPage() {
           <div className="print-card">
             <h3>Mapped incidents</h3>
             <div className="print-value">{pins.length}</div>
-            <div className="print-small">Addresses successfully geocoded (preview capped for demo).</div>
+            <div className="print-small">Geocoded from incident addresses</div>
           </div>
           <div className="print-card">
             <h3>Hotspot clusters</h3>
             <div className="print-value">{clusters.length}</div>
-            <div className="print-small">Density groupings using {radiusLabel(hotspotRadiusMiles)} radius threshold.</div>
+            <div className="print-small">Clustered by selected radius</div>
           </div>
           <div className="print-card">
-            <h3>Category filter</h3>
-            <div className="print-value" style={{ fontSize: 16 }}>{typeFilterLabel(typeFilter)}</div>
-            <div className="print-small">Classification is demo heuristics (not investigative determination).</div>
+            <h3>Top hotspot count</h3>
+            <div className="print-value">{printTopHotspots[0]?.count ?? 0}</div>
+            <div className="print-small">Largest cluster (mapped preview)</div>
           </div>
           <div className="print-card">
-            <h3>Time window</h3>
-            <div className="print-value" style={{ fontSize: 16 }}>{timeRangeLabel(timeRange)}</div>
-            <div className="print-small">Filtered by occurred_at when available.</div>
+            <h3>Mode</h3>
+            <div className="print-value">{mapMode === "hotspots" ? "Hotspots" : "Pins"}</div>
+            <div className="print-small">Interactive mode (screen only)</div>
           </div>
         </div>
 
-        <div className="print-hr" />
-
-        <div className="print-card">
-          <h3>Top hotspots</h3>
-          {topHotspots.length === 0 ? (
-            <div className="print-small">No hotspots detected in current mapped preview.</div>
+        <div className="print-section print-avoid-break">
+          <div className="print-section-title">Top hotspots (mapped preview)</div>
+          {printTopHotspots.length === 0 ? (
+            <div style={{ fontSize: 10, color: "#64748b" }}>No hotspots available (need at least 2 mapped pins nearby).</div>
           ) : (
             <table className="print-table">
               <thead>
                 <tr>
-                  <th>#</th>
-                  <th>Count</th>
-                  <th>Dominant</th>
-                  <th>Label (OSM)</th>
-                  <th>Radius (m)</th>
+                  <th style={{ width: "10%" }}>Rank</th>
+                  <th style={{ width: "12%" }}>Count</th>
+                  <th style={{ width: "20%" }}>Dominant</th>
+                  <th style={{ width: "18%" }}>Radius</th>
+                  <th>Near</th>
                 </tr>
               </thead>
               <tbody>
-                {topHotspots.map((c, idx) => (
-                  <tr key={c.id}>
+                {printTopHotspots.map((h, idx) => (
+                  <tr key={h.id}>
                     <td>{idx + 1}</td>
-                    <td><span className="print-badge">{c.count}</span></td>
-                    <td>{typeFilterLabel(c.dominantCategory)}</td>
-                    <td>{hotspotLabels[c.id] ?? "—"}</td>
-                    <td>{Math.round(c.radiusMeters)}</td>
+                    <td style={{ fontWeight: 900 }}>{h.count}</td>
+                    <td>{h.dominant}</td>
+                    <td>{h.radiusMeters}m</td>
+                    <td>{h.place || "—"}</td>
                   </tr>
                 ))}
               </tbody>
@@ -1786,26 +1785,24 @@ export default function DepartmentDetailPage() {
           )}
         </div>
 
-        <div className="print-hr" />
-
-        <div className="print-card">
-          <h3>Mapped incidents (sample)</h3>
-          {pinsForPrint.length === 0 ? (
-            <div className="print-small">No mapped incidents available in preview.</div>
+        <div className="print-section print-avoid-break">
+          <div className="print-section-title">Recent mapped incidents (sample)</div>
+          {recentPinsForPrint.length === 0 ? (
+            <div style={{ fontSize: 10, color: "#64748b" }}>No mapped incidents available for this filter/window.</div>
           ) : (
             <table className="print-table">
               <thead>
                 <tr>
-                  <th>ID</th>
-                  <th>When</th>
-                  <th>Category</th>
+                  <th style={{ width: "14%" }}>Incident</th>
+                  <th style={{ width: "18%" }}>When</th>
+                  <th style={{ width: "18%" }}>Category</th>
                   <th>Address</th>
                 </tr>
               </thead>
               <tbody>
-                {pinsForPrint.map((p) => (
-                  <tr key={p.incidentId}>
-                    <td>{p.incidentId}</td>
+                {recentPinsForPrint.map((p) => (
+                  <tr key={`p_${p.incidentId}`}>
+                    <td style={{ fontWeight: 800 }}>#{p.incidentId}</td>
                     <td>{p.occurredAt ? fmtLocalUtc(p.occurredAt).local : "—"}</td>
                     <td>{typeFilterLabel(p.dominantCategory)}</td>
                     <td>{p.addressLine}</td>
@@ -1814,11 +1811,16 @@ export default function DepartmentDetailPage() {
               </tbody>
             </table>
           )}
-          <div className="print-small">Note: the interactive map is not embedded in print export in this demo build.</div>
+        </div>
+
+        <div className="print-disclaimer">
+          <strong>NFPA-aligned note:</strong> This brief describes incident density patterns (“hotspots”) for triage, planning,
+          and community risk reduction. It is not a determination of cause, origin, responsibility, or investigative conclusions.
         </div>
 
         <div className="print-footer">
-          NFPA-aligned note: This brief describes incident density patterns only. It is not a determination of cause, origin, responsibility, or investigative conclusions.
+          Data limitations: geocoding is based on available address strings and may omit records that cannot be reliably located.
+          Hotspot clustering is radius-based and intended for operational planning and prevention prioritization.
         </div>
       </div>
 
@@ -1863,19 +1865,16 @@ export default function DepartmentDetailPage() {
             <button
               type="button"
               onClick={exportPinsCsv}
-              className="rounded-md border border-slate-800 bg-slate-950/20 px-3 py-2 text-xs font-semibold text-slate-100 hover:border-orange-400"
-              title="Export mapped incidents (pins) to CSV"
+              disabled={pins.length === 0}
+              className={cn(
+                "rounded-md border px-3 py-2 text-xs font-semibold",
+                pins.length === 0
+                  ? "border-slate-800 bg-slate-950/20 text-slate-500"
+                  : "border-slate-700 bg-slate-950/30 text-slate-100 hover:border-orange-400"
+              )}
+              title="Download mapped pins as CSV (based on current filters)"
             >
-              Export CSV (Pins)
-            </button>
-
-            <button
-              type="button"
-              onClick={exportHotspotsCsv}
-              className="rounded-md border border-slate-800 bg-slate-950/20 px-3 py-2 text-xs font-semibold text-slate-100 hover:border-orange-400"
-              title="Export hotspot clusters to CSV"
-            >
-              Export CSV (Hotspots)
+              Download Pins CSV
             </button>
 
             <button
@@ -1915,7 +1914,7 @@ export default function DepartmentDetailPage() {
               topHotspots={topHotspotsForAi}
             />
 
-            <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4" id="hotspot-map-anchor">
+            <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <div className="text-sm font-semibold text-slate-100">NERIS Hotspot Intelligence Map</div>
@@ -2026,9 +2025,7 @@ export default function DepartmentDetailPage() {
               {mapMode === "hotspots" ? (
                 <div className="mt-3 rounded-md border border-slate-800 bg-slate-950/20 p-3">
                   <div className="text-[10px] uppercase tracking-wide text-slate-400">Top hotspots (mapped)</div>
-                  <div className="mt-1 text-[11px] text-slate-500">
-                    Now labeled using OpenStreetMap reverse-geocoding (cached).
-                  </div>
+                  <div className="mt-1 text-[11px] text-slate-500">Now labeled using OpenStreetMap reverse-geocoding (cached).</div>
 
                   <div className="mt-3 grid gap-2 md:grid-cols-3">
                     {topHotspots.length === 0 ? (
