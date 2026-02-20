@@ -188,6 +188,31 @@ function radiusLabel(mi: HotspotRadiusMiles) {
   return mi === 1.0 ? "1 mile" : `${mi} mile`;
 }
 
+function sanitizeCsvCell(v: unknown) {
+  const s = String(v ?? "");
+  // basic CSV escaping + formula injection hardening
+  const trimmed = s.trim();
+  const needsGuard = /^[=+\-@]/.test(trimmed);
+  const guarded = needsGuard ? `'${trimmed}` : trimmed;
+  return `"${guarded.replace(/"/g, '""')}"`;
+}
+
+function downloadTextFile(filename: string, content: string, mime = "text/plain;charset=utf-8") {
+  try {
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch {
+    // ignore (demo-safe)
+  }
+}
+
 /**
  * Demo category mapping.
  * In a real build we’ll map exact NERIS incident codes → controlled taxonomy.
@@ -263,7 +288,6 @@ function typeFilterColor(k: TypeFilterKey) {
 type GeocodeCtx = {
   expectedCity?: string | null;
   expectedState?: string | null;
-  // Optional bounding box around department center (preferred once deptCenter is known)
   viewbox?: { left: number; top: number; right: number; bottom: number } | null;
 };
 
@@ -273,7 +297,6 @@ function geocodeCacheKey(q: string, ctx?: GeocodeCtx) {
   const vb = ctx?.viewbox
     ? `${ctx.viewbox.left.toFixed(2)},${ctx.viewbox.top.toFixed(2)},${ctx.viewbox.right.toFixed(2)},${ctx.viewbox.bottom.toFixed(2)}`
     : "";
-  // include ctx so MA vs SD results can't be cached under the same key
   return `geocode:v2:${q.toLowerCase()}|${city}|${state}|${vb}`;
 }
 
@@ -303,7 +326,6 @@ function normAlpha(s: unknown) {
     .toLowerCase();
 }
 
-// Very conservative state matching: accepts "MA" or "Massachusetts"
 function stateMatches(expectedState: string, addr: any) {
   const exp = normAlpha(expectedState);
   if (!exp) return true;
@@ -311,16 +333,12 @@ function stateMatches(expectedState: string, addr: any) {
   const stateCode = normAlpha(addr?.state_code);
   const stateName = normAlpha(addr?.state);
 
-  // if expected is "MA" style
   if (exp.length === 2) {
     if (stateCode === exp) return true;
-    // sometimes OSM returns full state name; allow "ma" to match start of name? no—too risky.
     return false;
   }
 
-  // expected is full name
   if (stateName === exp) return true;
-
   return false;
 }
 
@@ -340,7 +358,6 @@ function cityMatches(expectedCity: string, addr: any) {
 }
 
 function buildDeptViewbox(center: GeoPoint, milesRadius: number) {
-  // crude but effective: degrees per mile adjustments
   const lat = center.lat;
   const lon = center.lon;
 
@@ -359,16 +376,14 @@ async function geocodeAddress(q: string, ctx?: GeocodeCtx, signal?: AbortSignal)
   const cached = typeof window !== "undefined" ? readGeocodeCache(q, ctx) : null;
   if (cached) return cached;
 
-  // 1) First attempt: bounded + US + validate city/state when provided
   const tryFetch = async (query: string, attemptCtx?: GeocodeCtx) => {
     const url = new URL("https://nominatim.openstreetmap.org/search");
     url.searchParams.set("q", query);
     url.searchParams.set("format", "json");
-    url.searchParams.set("limit", "5"); // fetch a few so we can validate and choose best
+    url.searchParams.set("limit", "5");
     url.searchParams.set("addressdetails", "1");
     url.searchParams.set("countrycodes", "us");
 
-    // If we have a viewbox, bound to it.
     if (attemptCtx?.viewbox) {
       const vb = attemptCtx.viewbox;
       url.searchParams.set("viewbox", `${vb.left},${vb.top},${vb.right},${vb.bottom}`);
@@ -386,7 +401,6 @@ async function geocodeAddress(q: string, ctx?: GeocodeCtx, signal?: AbortSignal)
     const data = (await res.json().catch(() => null)) as any;
     const arr = Array.isArray(data) ? data : [];
 
-    // Pick first candidate that matches state/city constraints (if provided).
     const expectedState = (attemptCtx?.expectedState ?? "").trim();
     const expectedCity = (attemptCtx?.expectedCity ?? "").trim();
 
@@ -397,9 +411,7 @@ async function geocodeAddress(q: string, ctx?: GeocodeCtx, signal?: AbortSignal)
       return okState && okCity;
     });
 
-    const fallback = arr[0];
-
-    const chosen = pick ?? fallback;
+    const chosen = pick ?? arr[0];
     if (!chosen) return null;
 
     const lat = chosen?.lat ? Number(chosen.lat) : NaN;
@@ -409,14 +421,12 @@ async function geocodeAddress(q: string, ctx?: GeocodeCtx, signal?: AbortSignal)
     return { lat, lon };
   };
 
-  // Attempt 1: as-is query
   const p1 = await tryFetch(q, ctx);
   if (p1) {
     writeGeocodeCache(q, p1, ctx);
     return p1;
   }
 
-  // Attempt 2: strengthen query with expected city/state if present
   const city = (ctx?.expectedCity ?? "").trim();
   const state = (ctx?.expectedState ?? "").trim();
   const strengthened =
@@ -424,7 +434,7 @@ async function geocodeAddress(q: string, ctx?: GeocodeCtx, signal?: AbortSignal)
 
   const p2 = await tryFetch(strengthened, ctx);
   if (p2) {
-    writeGeocodeCache(q, p2, ctx); // cache under original key
+    writeGeocodeCache(q, p2, ctx);
     return p2;
   }
 
@@ -520,7 +530,7 @@ function haversineMeters(a: GeoPoint, b: GeoPoint) {
   const dLat = toRad(b.lat - a.lat);
   const dLon = toRad(b.lon - a.lon);
   const lat1 = toRad(a.lat);
-  const lat2 = toRad(b.lat); // ✅ bug fix (was a.lat)
+  const lat2 = toRad(b.lat);
 
   const sin1 = Math.sin(dLat / 2);
   const sin2 = Math.sin(dLon / 2);
@@ -1283,6 +1293,84 @@ export default function DepartmentDetailPage() {
     }, 50);
   }
 
+  function exportPinsCsv() {
+    const header = [
+      "department_id",
+      "department_name",
+      "time_window",
+      "category_filter",
+      "hotspot_radius_miles",
+      "incident_id",
+      "occurred_at",
+      "category",
+      "address_line",
+      "lat",
+      "lon",
+    ];
+
+    const rows = pins.map((p) => [
+      deptId,
+      dept?.name ?? "",
+      timeRangeLabel(timeRange),
+      typeFilterLabel(typeFilter),
+      hotspotRadiusMiles,
+      p.incidentId,
+      p.occurredAt ?? "",
+      typeFilterLabel(p.dominantCategory),
+      p.addressLine,
+      p.lat,
+      p.lon,
+    ]);
+
+    const csv = [header.map(sanitizeCsvCell).join(","), ...rows.map((r) => r.map(sanitizeCsvCell).join(","))].join("\n");
+    downloadTextFile(
+      `infernointelai_${deptId}_pins_${new Date().toISOString().slice(0, 10)}.csv`,
+      csv,
+      "text/csv;charset=utf-8"
+    );
+  }
+
+  function exportHotspotsCsv() {
+    const header = [
+      "department_id",
+      "department_name",
+      "time_window",
+      "category_filter",
+      "hotspot_radius_miles",
+      "cluster_id",
+      "count",
+      "dominant_category",
+      "place_label",
+      "center_lat",
+      "center_lon",
+      "radius_meters",
+      "incident_ids",
+    ];
+
+    const rows = clusters.map((c) => [
+      deptId,
+      dept?.name ?? "",
+      timeRangeLabel(timeRange),
+      typeFilterLabel(typeFilter),
+      hotspotRadiusMiles,
+      c.id,
+      c.count,
+      typeFilterLabel(c.dominantCategory),
+      hotspotLabels[c.id] ?? "",
+      c.center.lat,
+      c.center.lon,
+      Math.round(c.radiusMeters),
+      c.pins.map((p) => p.incidentId).join("|"),
+    ]);
+
+    const csv = [header.map(sanitizeCsvCell).join(","), ...rows.map((r) => r.map(sanitizeCsvCell).join(","))].join("\n");
+    downloadTextFile(
+      `infernointelai_${deptId}_hotspots_${new Date().toISOString().slice(0, 10)}.csv`,
+      csv,
+      "text/csv;charset=utf-8"
+    );
+  }
+
   // Load dept + incidents
   useEffect(() => {
     let cancelled = false;
@@ -1403,10 +1491,8 @@ export default function DepartmentDetailPage() {
       setMapNote("Geocoding…");
 
       try {
-        // Dept center: use dept name + city/state (already in deptQuery)
         const qDept = deptQuery(dept);
 
-        // Dept geocode context: we want the dept itself to resolve to its city/state when possible
         const deptCtx: GeocodeCtx = {
           expectedCity: dept.city ?? null,
           expectedState: dept.state ?? null,
@@ -1416,8 +1502,6 @@ export default function DepartmentDetailPage() {
         const deptP = qDept ? await geocodeAddress(qDept, deptCtx, controller.signal) : null;
         if (!cancelled) setDeptCenter(deptP);
 
-        // If we have a dept center, define a viewbox to constrain incident lookups.
-        // 12 miles is a demo-safe boundary: prevents “other state” errors while allowing mutual aid-ish edges.
         const viewbox = deptP ? buildDeptViewbox(deptP, 12) : null;
 
         const incidentCtxBase: GeocodeCtx = {
@@ -1426,7 +1510,6 @@ export default function DepartmentDetailPage() {
           viewbox,
         };
 
-        // Incident pins (limit for rate-limits)
         const toGeocode = filteredIncidents.slice(0, 40);
 
         const builtPins: IncidentPin[] = [];
@@ -1436,7 +1519,6 @@ export default function DepartmentDetailPage() {
           const q = incidentAddressLine(inc);
           if (!q) continue;
 
-          // Use dept constraints to prevent SD-style failures
           const p = await geocodeAddress(q, incidentCtxBase, controller.signal);
           if (!p) continue;
 
@@ -1578,6 +1660,18 @@ export default function DepartmentDetailPage() {
     }));
   }, [topHotspots, hotspotLabels]);
 
+  // Print table rows: show up to 25 pins, newest first
+  const pinsForPrint = useMemo(() => {
+    return pins
+      .slice()
+      .sort((a, b) => {
+        const ta = new Date(a.occurredAt ?? 0).getTime();
+        const tb = new Date(b.occurredAt ?? 0).getTime();
+        return tb - ta;
+      })
+      .slice(0, 25);
+  }, [pins]);
+
   return (
     <section className="space-y-4">
       {/* Print styles + print-only brief */}
@@ -1594,26 +1688,38 @@ export default function DepartmentDetailPage() {
             print-color-adjust: exact;
           }
 
-          .print-avoid-break { break-inside: avoid; page-break-inside: avoid; }
-
           .print-page {
             padding: 24px;
             font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
           }
 
-          .print-title { font-size: 18px; font-weight: 800; }
+          .print-title { font-size: 18px; font-weight: 900; }
           .print-subtitle { font-size: 12px; color: #334155; margin-top: 2px; }
           .print-meta { font-size: 11px; color: #475569; margin-top: 8px; }
+
+          .print-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
+          .print-card { border: 1px solid #e2e8f0; border-radius: 10px; padding: 10px; break-inside: avoid; page-break-inside: avoid; }
+          .print-card h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: #64748b; margin: 0 0 6px 0; }
+          .print-value { font-size: 18px; font-weight: 900; color: #0f172a; }
+          .print-small { font-size: 11px; color: #334155; margin-top: 6px; }
+          .print-note { margin-top: 12px; font-size: 11px; color: #334155; }
+          .print-hr { height: 1px; background: #e2e8f0; margin: 14px 0; }
+
+          .print-table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+          .print-table th { text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: #64748b; border-bottom: 1px solid #e2e8f0; padding: 8px 6px; }
+          .print-table td { font-size: 11px; color: #0f172a; border-bottom: 1px solid #f1f5f9; padding: 8px 6px; vertical-align: top; }
+          .print-badge { display: inline-block; border: 1px solid #cbd5e1; border-radius: 999px; padding: 2px 8px; font-size: 10px; font-weight: 700; color: #0f172a; }
 
           .print-footer { margin-top: 18px; padding-top: 10px; border-top: 1px solid #e2e8f0; font-size: 10px; color: #475569; }
         }
       `}</style>
 
       <div className="print-only print-page">
-        <div className="print-title">InfernoIntelAI — NERIS Hotspot Brief</div>
+        <div className="print-title">InfernoIntelAI — NERIS Hotspot Intelligence Brief</div>
         <div className="print-subtitle">
           {dept ? dept.name : "Department"} • {dept ? [dept.city, dept.state].filter(Boolean).join(", ") : ""}
         </div>
+
         <div className="print-meta">
           Generated: <strong>{generated.local}</strong> • Filters: <strong>{activeFiltersText}</strong> • Radius:{" "}
           <strong>{radiusLabel(hotspotRadiusMiles)}</strong>
@@ -1625,8 +1731,94 @@ export default function DepartmentDetailPage() {
           ) : null}
         </div>
 
+        <div className="print-grid">
+          <div className="print-card">
+            <h3>Mapped incidents</h3>
+            <div className="print-value">{pins.length}</div>
+            <div className="print-small">Addresses successfully geocoded (preview capped for demo).</div>
+          </div>
+          <div className="print-card">
+            <h3>Hotspot clusters</h3>
+            <div className="print-value">{clusters.length}</div>
+            <div className="print-small">Density groupings using {radiusLabel(hotspotRadiusMiles)} radius threshold.</div>
+          </div>
+          <div className="print-card">
+            <h3>Category filter</h3>
+            <div className="print-value" style={{ fontSize: 16 }}>{typeFilterLabel(typeFilter)}</div>
+            <div className="print-small">Classification is demo heuristics (not investigative determination).</div>
+          </div>
+          <div className="print-card">
+            <h3>Time window</h3>
+            <div className="print-value" style={{ fontSize: 16 }}>{timeRangeLabel(timeRange)}</div>
+            <div className="print-small">Filtered by occurred_at when available.</div>
+          </div>
+        </div>
+
+        <div className="print-hr" />
+
+        <div className="print-card">
+          <h3>Top hotspots</h3>
+          {topHotspots.length === 0 ? (
+            <div className="print-small">No hotspots detected in current mapped preview.</div>
+          ) : (
+            <table className="print-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Count</th>
+                  <th>Dominant</th>
+                  <th>Label (OSM)</th>
+                  <th>Radius (m)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {topHotspots.map((c, idx) => (
+                  <tr key={c.id}>
+                    <td>{idx + 1}</td>
+                    <td><span className="print-badge">{c.count}</span></td>
+                    <td>{typeFilterLabel(c.dominantCategory)}</td>
+                    <td>{hotspotLabels[c.id] ?? "—"}</td>
+                    <td>{Math.round(c.radiusMeters)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        <div className="print-hr" />
+
+        <div className="print-card">
+          <h3>Mapped incidents (sample)</h3>
+          {pinsForPrint.length === 0 ? (
+            <div className="print-small">No mapped incidents available in preview.</div>
+          ) : (
+            <table className="print-table">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>When</th>
+                  <th>Category</th>
+                  <th>Address</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pinsForPrint.map((p) => (
+                  <tr key={p.incidentId}>
+                    <td>{p.incidentId}</td>
+                    <td>{p.occurredAt ? fmtLocalUtc(p.occurredAt).local : "—"}</td>
+                    <td>{typeFilterLabel(p.dominantCategory)}</td>
+                    <td>{p.addressLine}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          <div className="print-small">Note: the interactive map is not embedded in print export in this demo build.</div>
+        </div>
+
         <div className="print-footer">
-          Demo artifact. Hotspots indicate density patterns only and are not cause/origin conclusions (NFPA-aligned discipline).
+          NFPA-aligned note: This brief describes incident density patterns only. It is not a determination of cause, origin, responsibility, or investigative conclusions.
         </div>
       </div>
 
@@ -1670,6 +1862,24 @@ export default function DepartmentDetailPage() {
 
             <button
               type="button"
+              onClick={exportPinsCsv}
+              className="rounded-md border border-slate-800 bg-slate-950/20 px-3 py-2 text-xs font-semibold text-slate-100 hover:border-orange-400"
+              title="Export mapped incidents (pins) to CSV"
+            >
+              Export CSV (Pins)
+            </button>
+
+            <button
+              type="button"
+              onClick={exportHotspotsCsv}
+              className="rounded-md border border-slate-800 bg-slate-950/20 px-3 py-2 text-xs font-semibold text-slate-100 hover:border-orange-400"
+              title="Export hotspot clusters to CSV"
+            >
+              Export CSV (Hotspots)
+            </button>
+
+            <button
+              type="button"
               onClick={exportBrief}
               className="rounded-md bg-orange-600 px-3 py-2 text-xs font-semibold text-white hover:bg-orange-500"
               title="Print / Export brief"
@@ -1705,7 +1915,7 @@ export default function DepartmentDetailPage() {
               topHotspots={topHotspotsForAi}
             />
 
-            <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
+            <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4" id="hotspot-map-anchor">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <div className="text-sm font-semibold text-slate-100">NERIS Hotspot Intelligence Map</div>
@@ -1816,7 +2026,9 @@ export default function DepartmentDetailPage() {
               {mapMode === "hotspots" ? (
                 <div className="mt-3 rounded-md border border-slate-800 bg-slate-950/20 p-3">
                   <div className="text-[10px] uppercase tracking-wide text-slate-400">Top hotspots (mapped)</div>
-                  <div className="mt-1 text-[11px] text-slate-500">Now labeled using OpenStreetMap reverse-geocoding (cached).</div>
+                  <div className="mt-1 text-[11px] text-slate-500">
+                    Now labeled using OpenStreetMap reverse-geocoding (cached).
+                  </div>
 
                   <div className="mt-3 grid gap-2 md:grid-cols-3">
                     {topHotspots.length === 0 ? (
