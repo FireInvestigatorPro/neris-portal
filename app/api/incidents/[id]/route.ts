@@ -1,63 +1,66 @@
 import { NextRequest, NextResponse } from "next/server";
-
-const BACKEND_URL =
-  process.env.BACKEND_URL ||
-  process.env.NEXT_PUBLIC_BACKEND_URL ||
-  process.env.NEXT_PUBLIC_API_BASE_URL;
-
-function baseUrl() {
-  if (!BACKEND_URL) {
-    throw new Error("Missing BACKEND_URL (or NEXT_PUBLIC_BACKEND_URL) env var");
-  }
-  return BACKEND_URL.replace(/\/$/, "");
-}
+import { backendBaseUrl, requireDemoAuth } from "../../_utils";
 
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   context: { params: Promise<{ id: string }> }
 ) {
-  try {
-    const { id } = await context.params;
-    const r = await fetch(`${baseUrl()}/api/v1/incidents/${id}`, {
-      cache: "no-store",
-    });
+  const auth = await requireDemoAuth();
+  if (!auth.ok) {
+    return NextResponse.json({ detail: "Auth required" }, { status: 401 });
+  }
 
-    const text = await r.text();
-    return new NextResponse(text, {
-      status: r.status,
-      headers: {
-        "content-type": r.headers.get("content-type") || "application/json",
-      },
-    });
-  } catch (e: any) {
+  const { id } = await context.params;
+
+  const departmentId = req.nextUrl.searchParams.get("departmentId");
+  if (!departmentId) {
     return NextResponse.json(
-      { detail: e?.message || "Failed to fetch incident" },
-      { status: 500 }
+      { detail: "Missing departmentId query param" },
+      { status: 400 }
     );
   }
+
+  const url = `${backendBaseUrl()}/api/v1/departments/${encodeURIComponent(
+    departmentId
+  )}/incidents/${encodeURIComponent(id)}`;
+
+  const res = await fetch(url, { cache: "no-store" });
+  const text = await res.text();
+
+  return new NextResponse(text, {
+    status: res.status,
+    headers: { "content-type": res.headers.get("content-type") ?? "application/json" },
+  });
 }
 
 export async function DELETE(
-  _req: NextRequest,
+  req: NextRequest,
   context: { params: Promise<{ id: string }> }
 ) {
-  try {
-    const { id } = await context.params;
-    const r = await fetch(`${baseUrl()}/api/v1/incidents/${id}`, {
-      method: "DELETE",
-    });
+  const auth = await requireDemoAuth();
+  if (!auth.ok) {
+    return NextResponse.json({ detail: "Auth required" }, { status: 401 });
+  }
 
-    const text = await r.text();
-    return new NextResponse(text, {
-      status: r.status,
-      headers: {
-        "content-type": r.headers.get("content-type") || "application/json",
-      },
-    });
-  } catch (e: any) {
+  const { id } = await context.params;
+
+  const departmentId = req.nextUrl.searchParams.get("departmentId");
+  if (!departmentId) {
     return NextResponse.json(
-      { detail: e?.message || "Failed to delete incident" },
-      { status: 500 }
+      { detail: "Missing departmentId query param" },
+      { status: 400 }
     );
   }
+
+  const url = `${backendBaseUrl()}/api/v1/departments/${encodeURIComponent(
+    departmentId
+  )}/incidents/${encodeURIComponent(id)}`;
+
+  const res = await fetch(url, { method: "DELETE", cache: "no-store" });
+  const text = await res.text();
+
+  return new NextResponse(text, {
+    status: res.status,
+    headers: { "content-type": res.headers.get("content-type") ?? "application/json" },
+  });
 }
